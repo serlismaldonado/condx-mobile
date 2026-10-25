@@ -1,0 +1,27 @@
+[package]
+name = "nsh-app-condx-mobile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+nsh-core = "0.2.0"
+nsh-base = "0.2.0"
+env_logger = "0.11"
+# El motor local-first (el mismo del daemon) y la firma del teléfono.
+localfirst-core = { path = "../localfirst/rust/localfirst-core" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde_json = "1"
+indexmap = "2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nsh-platform-linux = { version = "0.2.0", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nsh-platform-macos = { version = "0.2.0", default-features = false }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+nsh-platform-windows = { version = "0.2.0", default-features = false }
