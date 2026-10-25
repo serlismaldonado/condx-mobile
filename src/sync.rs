@@ -30,6 +30,33 @@ pub struct Approval {
     pub pending: bool,
 }
 
+/// Un incidente como lo ve el teléfono.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Incident {
+    pub id: String,
+    pub title: String,
+    pub source: String,
+    pub env: String,
+    pub status: String,
+    pub count: i64,
+    pub last_seen: i64,
+    pub error: String,
+    pub log: String,
+    /// `{runId, mode, status, template, model, answer, fix: {branch, commit, files, stat, changes, discarded}}`.
+    pub agent: Value,
+    /// Los flujos encendidos del proyecto, para desplegar un arreglo: (id, nombre).
+    pub workflows: Vec<(String, String)>,
+    /// Qué hizo el daemon con el último pedido de este teléfono.
+    pub result: Option<String>,
+    /// Hay un pedido propio sin respuesta todavía.
+    pub waiting: bool,
+}
+
+/// Lo que firma el teléfono para pedir algo sobre un incidente (mismo texto en el daemon).
+pub fn request_message(daemon_id: &str, incident_id: &str, request: &str, request_id: &str, at: i64, arg: &str) -> String {
+    format!("condx-incident:v1|{daemon_id}|{incident_id}|{request}|{request_id}|{at}|{arg}")
+}
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
@@ -135,6 +162,8 @@ pub struct Phone {
     engine: CloudEngine,
     transport: ConvexHttpTransport,
     scope: String,
+    /// Los incidentes del daemon (`incidents:<daemon>`).
+    incidents_scope: String,
 }
 
 pub type Shared = Arc<Mutex<Phone>>;
@@ -151,13 +180,15 @@ impl Phone {
         .map_err(|e| e.to_string())?;
         let scope = format!("approvals:{}", identity.daemon_id);
         engine.enable_scope(&scope, None).map_err(|e| e.to_string())?;
+        let incidents_scope = format!("incidents:{}", identity.daemon_id);
+        engine.enable_scope(&incidents_scope, None).map_err(|e| e.to_string())?;
         let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
-        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope })
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
     pub fn sync(&mut self) -> Result<Vec<Approval>, String> {
-        match self.transport.doorbell(std::slice::from_ref(&self.scope), PROTOCOL_VERSION).map_err(|e| e.to_string())? {
+        match self.transport.doorbell(&[self.scope.clone(), self.incidents_scope.clone()], PROTOCOL_VERSION).map_err(|e| e.to_string())? {
             Doorbell::Versions(v) => self.engine.on_doorbell(&v, now_ms()).map_err(|e| e.to_string())?,
             Doorbell::UpgradeRequired => return Err("Condx Cloud needs a newer app".into()),
         }
@@ -212,6 +243,58 @@ impl Phone {
             set.insert("confirmText".into(), json!(text));
         }
         self.engine.commit(vec![OpDraft::patch(&self.scope, job_id, set)], at).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Los incidentes: abiertos primero, el más reciente arriba.
+    pub fn incidents(&self) -> Vec<Incident> {
+        let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let mine = hex(self.key.verifying_key().as_bytes());
+        let mut list: Vec<Incident> = self
+            .engine
+            .rows(&self.incidents_scope)
+            .into_iter()
+            .map(|r| {
+                let v = &r.row.values;
+                // El pedido propio que sigue sin respuesta del daemon.
+                let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
+                let request_id = v.get("requestId").and_then(Value::as_str).map(str::to_string);
+                let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id.as_deref();
+                Incident {
+                    id: r.row.id.clone(),
+                    title: s(v, "title"),
+                    source: s(v, "source"),
+                    env: s(v, "env"),
+                    status: s(v, "status"),
+                    count: v.get("count").and_then(Value::as_i64).unwrap_or(1),
+                    last_seen: v.get("lastSeen").and_then(Value::as_i64).unwrap_or(0),
+                    error: s(v, "error"),
+                    log: s(v, "log"),
+                    agent: v.get("agent").cloned().unwrap_or(Value::Null),
+                    workflows: v.get("workflows").and_then(Value::as_array).into_iter().flatten().filter_map(|w| Some((w["id"].as_str()?.to_string(), w["name"].as_str()?.to_string()))).collect(),
+                    result: v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string),
+                    waiting: own && (r.pending || !answered),
+                }
+            })
+            .collect();
+        list.sort_by_key(|i| (i.status != "open", std::cmp::Reverse(i.last_seen)));
+        list
+    }
+
+    /// Pide algo sobre un incidente (diagnosticar, arreglar, ignorar, resolver, desplegar con un
+    /// flujo, descartar el arreglo, o un mensaje al agente). Va firmado; el daemon decide.
+    pub fn request(&mut self, incident_id: &str, request: &str, arg: &str) -> Result<(), String> {
+        let at = now_ms();
+        let request_id = random_hex(8);
+        let signature = self.key.sign(request_message(&self.daemon_id, incident_id, request, &request_id, at, arg).as_bytes());
+        let mut set = Values::new();
+        set.insert("request".into(), json!(request));
+        set.insert("requestArg".into(), if arg.is_empty() { Value::Null } else { json!(arg) });
+        set.insert("requestId".into(), json!(request_id));
+        set.insert("requestedAt".into(), json!(at));
+        set.insert("deviceKey".into(), json!(hex(self.key.verifying_key().as_bytes())));
+        set.insert("signature".into(), json!(hex(&signature.to_bytes())));
+        self.engine.commit(vec![OpDraft::patch(&self.incidents_scope, incident_id, set)], at).map_err(|e| e.to_string())?;
         Ok(())
     }
 

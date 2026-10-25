@@ -132,7 +132,8 @@ pub enum Variant {
     Danger,
 }
 
-pub fn button(label: &'static str, variant: Variant, on_press: impl Fn() + 'static) -> impl IntoElement {
+pub fn button(label: impl Into<String>, variant: Variant, on_press: impl Fn() + 'static) -> impl IntoElement {
+    let label: String = label.into();
     let (bg, border, fg) = match variant {
         Variant::Primary => (Some(tokens::ACCENT), tokens::ACCENT, tokens::ON_ACCENT),
         Variant::Outline => (None, tokens::CARD_BORDER, tokens::FG),
@@ -180,7 +181,8 @@ pub fn ago(ms: i64) -> String {
 /// Deslizar para confirmar, como el «slide to unlock» del iPhone: la perilla amarilla sigue al
 /// dedo (en nativo, sin trabajo por cuadro) y, si llega casi al final, `on_done`; si no, vuelve.
 /// Reemplaza escribir el nombre del entorno: es igual de deliberado y no se hace por accidente.
-pub fn slide_to_confirm(label: &'static str, on_done: impl Fn() + Clone + 'static) -> impl IntoElement {
+pub fn slide_to_confirm(label: impl Into<String>, on_done: impl Fn() + Clone + 'static) -> impl IntoElement {
+    let label: String = label.into();
     const KNOB: f32 = 48.0;
     const HEIGHT: f32 = 48.0;
     let width = signal(0.0f32);
@@ -214,7 +216,7 @@ pub fn slide_to_confirm(label: &'static str, on_done: impl Fn() + Clone + 'stati
                         .items_center()
                         .justify_center()
                         .bind_opacity(&label_fade)
-                        .child(text(label).text_size(px(13.5)).text_color(c(tokens::MUTED))),
+                        .child(text(label.clone()).text_size(px(13.5)).text_color(c(tokens::MUTED))),
                 )
                 .child(
                     view()

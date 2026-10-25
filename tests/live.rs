@@ -136,3 +136,60 @@ fn escribir_el_nombre_y_produccion_con_touch_id() {
 
     daemon("DELETE", &format!("/api/cloud/devices/{device_id}"), None);
 }
+
+/// Espera un incidente en el teléfono que cumpla `ok`.
+fn wait_incident(phone: &mut Phone, what: &str, ok: impl Fn(&sync::Incident) -> bool) -> sync::Incident {
+    for _ in 0..120 {
+        let _ = phone.sync();
+        if let Some(i) = phone.incidents().into_iter().find(|i| ok(i)) {
+            return i;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+#[test]
+#[ignore = "needs a throwaway condxd (fake agent, an enabled workflow) linked to a throwaway Condx Cloud and an open incident titled “Unit tests failed…”"]
+fn incidentes_desde_el_telefono() {
+    let (mut phone, device_id) = paired_phone("Incidents phone");
+    let inc = wait_incident(&mut phone, "the incident", |i| i.title.starts_with("Unit tests failed") && i.status == "open");
+    let id = inc.id.clone();
+
+    // Diagnosticar: el daemon arranca el agente (pedido firmado) y su respuesta llega al teléfono.
+    phone.request(&id, "diagnose", "").unwrap();
+    let i = wait_incident(&mut phone, "the diagnosis", |i| i.id == id && i.agent["mode"] == "diagnose" && i.agent["status"] == "done");
+    assert!(i.result.as_deref().unwrap_or_default().starts_with("started run-"), "{:?}", i.result);
+    assert!(i.agent["answer"].as_str().unwrap_or_default().contains("## Cause"));
+
+    // Preparar un arreglo: queda en su rama, con sus archivos.
+    phone.request(&id, "fix", "").unwrap();
+    let i = wait_incident(&mut phone, "the fix", |i| i.id == id && i.agent["mode"] == "fix" && i.agent["fix"]["changes"] == true);
+    assert_eq!(i.agent["fix"]["files"], serde_json::json!(["lib/dates.js"]));
+    let (workflow, _) = i.workflows.first().cloned().expect("an enabled workflow");
+
+    // Desplegar con un flujo: el daemon lo arranca con el commit del arreglo (el flujo pide sus aprobaciones).
+    phone.request(&id, "deploy", &workflow).unwrap();
+    let i = wait_incident(&mut phone, "the deploy", |i| i.id == id && i.result.as_deref().is_some_and(|r| r.contains("workflow")) && !i.waiting);
+    assert!(i.result.as_deref().unwrap().contains("started"), "{:?}", i.result);
+
+    // Un mensaje al agente.
+    phone.request(&id, "message", "Explain the change in one line").unwrap();
+    let i = wait_incident(&mut phone, "the message", |i| i.id == id && !i.waiting && i.result.is_some());
+    assert_eq!(i.result.as_deref(), Some("sent to the agent"));
+    // Espera a que el agente termine antes de descartar.
+    wait_incident(&mut phone, "the agent to finish", |i| i.id == id && i.agent["status"] == "done");
+
+    // Descartar el arreglo, ignorar y resolver.
+    phone.request(&id, "discard", "").unwrap();
+    let i = wait_incident(&mut phone, "the discard", |i| i.id == id && i.agent["fix"]["discarded"] == true);
+    assert_eq!(i.result.as_deref(), Some("fix discarded"));
+    phone.request(&id, "ignore", "").unwrap();
+    wait_incident(&mut phone, "ignored", |i| i.id == id && i.status == "ignored");
+    phone.request(&id, "resolve", "").unwrap();
+    wait_incident(&mut phone, "resolved", |i| i.id == id && i.status == "resolved");
+
+    // Un teléfono desvinculado ya no pide nada.
+    daemon("DELETE", &format!("/api/cloud/devices/{device_id}"), None);
+    assert!(phone.sync().is_err());
+}

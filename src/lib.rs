@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use nsh_base::safe_area_view;
 use nsh_core::ui::prelude::*;
-use sync::{Approval, Phone};
+use sync::{Approval, Incident, Phone};
 use theme::{c, card, field, kind_tag, kv, mono, muted, section, status_tag, tokens, Health, Variant};
 
 #[native_module("condx-mobile/native")]
@@ -55,6 +55,11 @@ pub fn App() -> impl IntoElement {
     // Avanza en cada vuelta del ciclo: los «hace N min» se vuelven a calcular.
     let tick = signal(0u64);
     let approvals = signal(Vec::<Approval>::new());
+    // Incidentes (A0b): la lista, la pestaña elegida, las tarjetas abiertas y el mensaje al agente.
+    let incidents = signal(Vec::<Incident>::new());
+    let tab = signal("approvals");
+    let expanded = signal(Vec::<String>::new());
+    let agent_text = signal(String::new());
     let fingerprint = signal(String::new());
     let slot: Slot = Arc::new(Mutex::new(None));
     // Vincular: el texto del QR (o solo el código) y la URL del deployment si hace falta.
@@ -92,8 +97,9 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
-                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes()))).await {
-                            Some(Ok((list, pending))) => {
+                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents()))).await {
+                            Some(Ok((list, pending, incs))) => {
+                                incidents.set(incs);
                                 let waiting = list.iter().filter(|a| a.status == "waiting-approval").count();
                                 waiting_count.set(waiting);
                                 if status.get().starts_with("Offline") {
@@ -161,6 +167,22 @@ pub fn App() -> impl IntoElement {
                 }
                 if let Some(list) = with_phone(&slot, |p| p.approvals()).await {
                     approvals.set(list);
+                }
+            });
+        }
+    };
+
+    // Un pedido sobre un incidente: sale firmado en el próximo sync; el daemon decide.
+    let ask = {
+        let slot = slot.clone();
+        move |id: String, request: &'static str, arg: String| {
+            let slot = slot.clone();
+            spawn(async move {
+                if let Some(Err(e)) = with_phone(&slot, move |p| p.request(&id, request, &arg)).await {
+                    status.set(format!("Couldn't send: {e}"));
+                }
+                if let Some(list) = with_phone(&slot, |p| p.incidents()).await {
+                    incidents.set(list);
                 }
             });
         }
@@ -240,6 +262,135 @@ pub fn App() -> impl IntoElement {
                 ),
                 (false, _) => None,
             })
+    };
+
+    // Una tarjeta de incidente, con lo que hizo el agente y lo que se puede pedir.
+    let incident_row = move |i: ReadSignal<Incident>, _ix: ReadSignal<usize>| {
+        let inc = i.get();
+        let agent = inc.agent.clone();
+        let agent_status = agent["status"].as_str().unwrap_or("").to_string();
+        let running = agent_status == "running";
+        let open = inc.status != "resolved";
+        let fix = agent["fix"].clone();
+        let fix_ready = fix["changes"] == true && fix["discarded"] != true && fix["commit"].is_string();
+        let is_expanded = expanded.get().contains(&inc.id);
+        let mut k = card().child(
+            view()
+                .flex_row()
+                .gap_2()
+                .items_center()
+                .child(view().flex_1().child(text(inc.title.clone()).text_size(px(14.0)).text_color(c(tokens::FG))))
+                .child(kind_tag(&inc.source)),
+        );
+        let when = theme::ago(inc.last_seen);
+        let meta = [(!inc.env.is_empty()).then(|| format!("on {}", inc.env)), (inc.count > 1).then(|| format!("{} times", inc.count)), Some(when), (inc.status == "ignored").then(|| "ignored".to_string()), (inc.status == "resolved").then(|| "resolved".to_string())];
+        k = k.child(muted(meta.into_iter().flatten().collect::<Vec<_>>().join(" · ")));
+        if !inc.error.is_empty() {
+            let first: String = inc.error.lines().next().unwrap_or("").chars().take(140).collect();
+            k = k.child(text(first).font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(c(tokens::PROD)));
+        }
+        // El agente: estado, plantilla y su respuesta (la causa; toda al abrirla).
+        if agent.is_object() {
+            let (h, label) = match (agent_status.as_str(), agent["mode"].as_str()) {
+                ("running", Some("fix")) => (Health::Warn, "An agent is preparing a fix".to_string()),
+                ("running", _) => (Health::Warn, "An agent is diagnosing it".to_string()),
+                ("done", Some("fix")) => (Health::Ok, format!("Fix prepared by {}", agent["model"].as_str().unwrap_or("the agent"))),
+                ("done", _) => (Health::Ok, format!("Diagnosis by {}", agent["model"].as_str().unwrap_or("the agent"))),
+                ("stopped", _) => (Health::Unknown, "The agent stopped (limit or budget)".to_string()),
+                ("aborted", _) => (Health::Unknown, "The agent was stopped".to_string()),
+                _ => (Health::Bad, "The agent failed".to_string()),
+            };
+            k = k.child(status_tag(h, label));
+            if let Some(answer) = agent["answer"].as_str().filter(|a| !a.trim().is_empty()) {
+                let shown: String = if is_expanded {
+                    answer.to_string()
+                } else {
+                    answer.split("## ").find(|s| s.starts_with("Cause")).map(|s| s.trim_start_matches("Cause").trim().to_string()).unwrap_or_else(|| answer.chars().take(240).collect())
+                };
+                let mut col = view().gap_1();
+                for line in shown.lines().filter(|l| !l.trim().is_empty()) {
+                    col = col.child(match line.strip_prefix("## ") {
+                        Some(h) => section(h).into_element(),
+                        None => text(line.to_string()).text_size(px(13.0)).text_color(c(tokens::FG)).into_element(),
+                    });
+                }
+                let id = inc.id.clone();
+                k = k.child(col).child(
+                    view()
+                        .flex_row()
+                        .child(text(if is_expanded { "Show less" } else { "Show the whole answer" }).text_size(px(12.5)).text_color(c(tokens::MUTED)))
+                        .on_press(move || {
+                            let mut e = expanded.get();
+                            if let Some(ix) = e.iter().position(|x| x == &id) { e.remove(ix); } else { e.push(id.clone()); }
+                            expanded.set(e);
+                        }),
+                );
+            }
+            if fix_ready {
+                k = k.child(status_tag(Health::Ok, format!("Fix ready on {} · {} files", fix["branch"].as_str().unwrap_or("?"), fix["files"].as_array().map(Vec::len).unwrap_or(0))));
+                if let Some(stat) = fix["stat"].as_str() {
+                    k = k.child(text(stat.to_string()).font_family(theme::MONO_FONT).text_size(px(11.0)).text_color(c(tokens::MUTED)));
+                }
+            }
+        }
+        // Lo que hizo el daemon con el último pedido de este teléfono.
+        if inc.waiting {
+            k = k.child(status_tag(Health::Warn, "Sending your request…"));
+        } else if let Some(r) = &inc.result {
+            k = k.child(status_tag(if r.starts_with("rejected") { Health::Bad } else { Health::Ok }, r.clone()));
+        }
+        if open && !inc.waiting && !running {
+            let (a1, a2, a3, a4) = (ask.clone(), ask.clone(), ask.clone(), ask.clone());
+            let (id1, id2, id3, id4) = (inc.id.clone(), inc.id.clone(), inc.id.clone(), inc.id.clone());
+            k = k
+                .child(
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .pt_1()
+                        .child(theme::button(if agent.is_object() { "Diagnose again" } else { "Diagnose" }, Variant::Primary, move || a1(id1.clone(), "diagnose", String::new())))
+                        .child(theme::button("Prepare a fix", Variant::Outline, move || a2(id2.clone(), "fix", String::new()))),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .child(theme::button("Ignore", Variant::Outline, move || a3(id3.clone(), "ignore", String::new())))
+                        .child(theme::button("Resolve", Variant::Outline, move || a4(id4.clone(), "resolve", String::new()))),
+                );
+            // Desplegar el arreglo: deslizar (el flujo pide sus propias aprobaciones).
+            if fix_ready {
+                for (wid, name) in inc.workflows.iter().take(3) {
+                    let (a, id, wid) = (ask.clone(), inc.id.clone(), wid.clone());
+                    k = k.child(theme::slide_to_confirm(format!("Slide to run “{name}”"), move || a(id.clone(), "deploy", wid.clone())));
+                }
+                if inc.workflows.is_empty() {
+                    k = k.child(muted("Turn on a workflow on the Mac to deploy fixes from here."));
+                }
+                let (a, id) = (ask.clone(), inc.id.clone());
+                k = k.child(view().flex_row().child(theme::button("Discard the fix", Variant::Danger, move || a(id.clone(), "discard", String::new()))));
+            }
+        }
+        // Escribirle al agente (sigue la conversación o la redirige si está trabajando).
+        if agent.is_object() && open && !inc.waiting {
+            let (a, id) = (ask.clone(), inc.id.clone());
+            k = k.child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .child(view().flex_1().child(field("Write to the agent…", agent_text)))
+                    .child(view().w(px(84.0)).flex_row().child(theme::button("Send", Variant::Outline, move || {
+                        let text = agent_text.get().trim().to_string();
+                        if text.is_empty() {
+                            return;
+                        }
+                        agent_text.set(String::new());
+                        a(id.clone(), "message", text);
+                    }))),
+            );
+        }
+        k
     };
 
     let pair_view = move || {
@@ -341,15 +492,50 @@ pub fn App() -> impl IntoElement {
                                         view()
                                             .p_4()
                                             .gap_3()
-                                            .child(section("Approvals"))
+                                            // Pestañas: aprobaciones e incidentes.
                                             .child(dynamic(move || {
+                                                let open = incidents.get().iter().filter(|i| i.status == "open").count();
+                                                let incidents_label = if open > 0 { format!("Incidents · {open}") } else { "Incidents".to_string() };
+                                                view()
+                                                    .flex_row()
+                                                    .gap_2()
+                                                    .child(theme::button("Approvals", if tab.get() == "approvals" { Variant::Primary } else { Variant::Outline }, move || tab.set("approvals")))
+                                                    .child(theme::button(incidents_label, if tab.get() == "incidents" { Variant::Primary } else { Variant::Outline }, move || tab.set("incidents")))
+                                                    .into_element()
+                                            }))
+                                            .child(dynamic(move || {
+                                                if tab.get() != "approvals" {
+                                                    return view().into_element();
+                                                }
                                                 if visible().is_empty() { card().child(muted("Nothing is waiting for your approval.")).into_element() } else { view().into_element() }
                                             }))
-                                            .child(view().gap_3().child(each(
-                                                visible,
-                                                |a: &Approval| format!("{}|{:?}|{:?}|{}|{}", a.job_id, a.decision, a.phone_result, a.pending, a.status),
-                                                row.clone(),
-                                            )))
+                                            .child(dynamic({
+                                                let row = row.clone();
+                                                move || {
+                                                if tab.get() != "approvals" {
+                                                    return view().into_element();
+                                                }
+                                                view().gap_3().child(each(
+                                                    visible,
+                                                    |a: &Approval| format!("{}|{:?}|{:?}|{}|{}", a.job_id, a.decision, a.phone_result, a.pending, a.status),
+                                                    row.clone(),
+                                                )).into_element()
+                                            }}))
+                                            .child(dynamic({
+                                                let incident_row = incident_row.clone();
+                                                move || {
+                                                if tab.get() != "incidents" {
+                                                    return view().into_element();
+                                                }
+                                                if incidents.get().is_empty() {
+                                                    return card().child(status_tag(Health::Ok, "No incidents. Everything Condx watches is fine.")).into_element();
+                                                }
+                                                view().gap_3().child(each(
+                                                    move || incidents.get(),
+                                                    |i: &Incident| format!("{}|{}|{}|{:?}|{}|{}|{}", i.id, i.status, i.count, i.result, i.waiting, i.agent, i.workflows.len()),
+                                                    incident_row.clone(),
+                                                )).into_element()
+                                            }}))
                                             .child(view().pt_2().child(section("This phone")))
                                             .child(
                                                 card()
