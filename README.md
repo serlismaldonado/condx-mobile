@@ -6,6 +6,8 @@ Native Shell (Rust); the design is in Condx's `docs/design/cloud.md` (phase C4).
 - `src/sync.rs`: pairing, the local-first engine (`localfirst-core`) and signed decisions.
 - `src/secure.rs`: the phone's identity in the Keychain (iOS) or the Keystore (Android).
 - `src/lib.rs`: the screens (pair → confirm on the Mac → approvals).
+- `src/theme.rs`: the desktop app's theme (tokens, flat cards, status dots, buttons), light and dark;
+  the fonts (IBM Plex Sans, JetBrains Mono, OFL) are in `assets/fonts`.
 
 ```sh
 nsh run --target android               # emulator (adb reverse the Cloud's port for a local backend)

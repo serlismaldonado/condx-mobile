@@ -10,17 +10,21 @@
 
 pub mod secure;
 pub mod sync;
+pub mod theme;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use nsh_base::{safe_area_view, theme};
+use nsh_base::safe_area_view;
 use nsh_core::ui::prelude::*;
 use sync::{Approval, Phone};
+use theme::{c, card, field, kind_tag, kv, mono, muted, section, status_tag, tokens, Health, Variant};
 
 #[native_module("condx-mobile/native")]
 fn native(registry: &mut Registry) {
     registry.register::<App>();
+    // IBM Plex Sans y JetBrains Mono, las fuentes de la app de escritorio.
+    registry.assets(assets!());
 }
 
 #[derive(Clone, PartialEq)]
@@ -41,34 +45,13 @@ async fn with_phone<R: Send + 'static>(slot: &Slot, f: impl FnOnce(&mut Phone) -
     blocking(move || slot.lock().ok()?.as_mut().map(f)).await.ok().flatten()
 }
 
-fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static) -> impl IntoElement {
-    view()
-        .flex_1()
-        .py_3()
-        .items_center()
-        .rounded(px(10.0))
-        .bg(move || if primary { theme().primary } else { theme().secondary })
-        .active(|s| s.opacity(0.6))
-        .on_press(on_press)
-        .child(text(label).text_color(move || if primary { theme().primary_foreground } else { theme().foreground }))
-}
-
-fn field(placeholder: &'static str, value: Signal<String>) -> impl IntoElement {
-    input()
-        .value(move || value.get())
-        .placeholder(placeholder)
-        .auto_correct(false)
-        .on_change(move |t: &str| value.set(t.to_string()))
-        .px_3()
-        .py_2()
-        .rounded(px(8.0))
-        .bg(move || theme().secondary)
-}
-
 #[component]
 pub fn App() -> impl IntoElement {
     let screen = signal(Screen::Loading);
+    // Mensajes para la persona (errores, avisos) y el estado de la sincronización (barra superior).
     let status = signal(String::new());
+    let sync_line = signal(String::new());
+    let waiting_count = signal(0usize);
     let approvals = signal(Vec::<Approval>::new());
     let fingerprint = signal(String::new());
     let slot: Slot = Arc::new(Mutex::new(None));
@@ -112,13 +95,20 @@ pub fn App() -> impl IntoElement {
                         match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes()))).await {
                             Some(Ok((list, pending))) => {
                                 let waiting = list.iter().filter(|a| a.status == "waiting-approval").count();
-                                status.set(match pending {
-                                    0 => format!("{waiting} waiting · in sync"),
-                                    n => format!("{waiting} waiting · sending {n}…"),
+                                waiting_count.set(waiting);
+                                if status.get().starts_with("Offline") {
+                                    status.set(String::new());
+                                }
+                                sync_line.set(match pending {
+                                    0 => "in sync".to_string(),
+                                    n => format!("sending {n}…"),
                                 });
                                 approvals.set(list);
                             }
-                            Some(Err(e)) => status.set(format!("Offline: {}", e.chars().take(80).collect::<String>())),
+                            Some(Err(e)) => {
+                                sync_line.set("offline".into());
+                                status.set(format!("Offline: {}", e.chars().take(80).collect::<String>()));
+                            }
                             None => {}
                         }
                     }
@@ -188,6 +178,10 @@ pub fn App() -> impl IntoElement {
         }
     };
 
+    // Como en la app de escritorio, solo lo que espera; y lo que decidió este teléfono, para ver
+    // qué hizo la Mac con eso.
+    let visible = move || approvals.get().into_iter().filter(|a| a.status == "waiting-approval" || a.decision.is_some()).collect::<Vec<_>>();
+
     let row = move |a: ReadSignal<Approval>, _ix: ReadSignal<usize>| {
         let (d1, d2) = (decide.clone(), decide.clone());
         let item = a.get();
@@ -197,32 +191,41 @@ pub fn App() -> impl IntoElement {
         // Producción (o aprobación reforzada): el teléfono solo propone; la Mac confirma con Touch ID.
         let prod = item.level == "reinforced" || item.env_kind == "cloud-prod";
         let waiting = item.status == "waiting-approval" && item.decision.is_none();
-        let state = match (&item.decision, item.pending, item.phone_result.as_deref(), item.status.as_str()) {
-            (Some(_), true, _, _) => "Sending your decision…".to_string(),
-            (Some(_), false, Some("approved"), _) => "Approved from this phone".to_string(),
-            (Some(_), false, Some("rejected the job"), _) => "Rejected from this phone".to_string(),
-            (Some(_), false, Some("needs-mac"), _) => "Waiting for Touch ID on the Mac".to_string(),
-            (Some(_), false, Some(r), _) => format!("The Mac didn't apply it: {}", r.trim_start_matches("rejected: ")),
-            (Some(d), false, None, _) => format!("You chose {d} · the Mac checks it"),
-            (None, _, _, "waiting-approval") => format!("Needs your approval ({})", if prod { "production: Touch ID on the Mac" } else { item.level.as_str() }),
-            (None, _, _, s) => format!("Done: {s}"),
+        let (health, state) = match (&item.decision, item.pending, item.phone_result.as_deref(), item.status.as_str()) {
+            (Some(_), true, _, _) => (Health::Unknown, "Sending your decision…".to_string()),
+            (Some(_), false, Some("approved"), _) => (Health::Ok, "Approved from this phone".to_string()),
+            (Some(_), false, Some("rejected the job"), _) => (Health::Bad, "Rejected from this phone".to_string()),
+            (Some(_), false, Some("needs-mac"), _) => (Health::Warn, "Waiting for Touch ID on the Mac".to_string()),
+            (Some(_), false, Some(r), _) => (Health::Bad, format!("The Mac didn't apply it: {}", r.trim_start_matches("rejected: "))),
+            (Some(d), false, None, _) => (Health::Unknown, format!("You chose {d} · the Mac checks it")),
+            (None, _, _, "waiting-approval") => (Health::Warn, format!("Needs your approval · {}", if prod { "production: Touch ID on the Mac" } else { item.level.as_str() })),
+            (None, _, _, s) => (Health::Unknown, format!("Done: {s}")),
         };
-        view()
-            .p_4()
-            .gap_2()
-            .rounded(px(14.0))
-            .border_1()
-            .border_color(move || theme().border)
-            .child(text(item.title.clone()).text_size(px(17.0)))
-            .child(text(format!("{} · {} · asked by {}", item.recipe, item.env, item.requested_by)).text_size(px(13.0)).text_color(move || theme().muted_foreground))
-            .child(text(state).text_size(px(13.0)))
-            .child(if waiting && typed { Some(field("Type the environment's name to approve", confirm_text)) } else { None })
+        let summary = format!(
+            "requested by {}{} · recipe {}",
+            item.requested_by,
+            if item.created_at > 0 { format!(" {}", theme::ago(item.created_at)) } else { String::new() },
+            item.recipe
+        );
+        card()
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .child(view().flex_1().child(text(format!("{} · {}", item.title, item.env)).text_size(px(14.0)).text_color(c(tokens::FG))))
+                    .child(kind_tag(&item.env_kind)),
+            )
+            .child(muted(summary))
+            .child(status_tag(health, state))
+            .child(if waiting && typed { Some(kv("Confirm", field("Type the environment's name", confirm_text))) } else { None })
             .child(if waiting {
                 Some(
                     view()
                         .flex_row()
-                        .gap_3()
-                        .child(button(if prod { "Propose" } else { "Approve" }, true, move || {
+                        .gap_2()
+                        .pt_1()
+                        .child(theme::button(if prod { "Propose" } else { "Approve" }, Variant::Primary, move || {
                             let confirm = typed.then(|| confirm_text.get().trim().to_string());
                             if typed && confirm.as_deref() != Some(env.as_str()) {
                                 status.set(format!("Type “{env}” to approve"));
@@ -231,7 +234,7 @@ pub fn App() -> impl IntoElement {
                             confirm_text.set(String::new());
                             d1(job_a.clone(), true, confirm);
                         }))
-                        .child(button("Reject", false, move || d2(job_r.clone(), false, None))),
+                        .child(theme::button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None))),
                 )
             } else {
                 None
@@ -241,47 +244,122 @@ pub fn App() -> impl IntoElement {
     let pair_view = move || {
         view()
             .gap_3()
-            .child(text("Pair with your Mac").text_size(px(20.0)))
-            .child(text("On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Paste the QR's text, or type the code and the deployment URL.").text_size(px(14.0)).text_color(move || theme().muted_foreground))
-            .child(field("Code (K7Q2-M9XD-4HWR) or the QR's text", pairing_text))
-            .child(field("Deployment URL (only with a typed code)", pairing_url))
-            .child(view().flex_row().child(button("Pair", true, do_pair)))
+            .child(section("Pair with your Mac"))
+            .child(
+                card()
+                    .gap_3()
+                    .child(muted("On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Paste the QR's text, or type the code and the deployment URL."))
+                    .child(field("Code (K7Q2-M9XD-4HWR) or the QR's text", pairing_text).auto_capitalize(AutoCapitalize::None))
+                    .child(field("Deployment URL (only with a typed code)", pairing_url).auto_capitalize(AutoCapitalize::None).keyboard_type(KeyboardType::Url))
+                    .child(view().flex_row().child(theme::button("Pair", Variant::Primary, do_pair))),
+            )
+    };
+
+    // Barra superior, como la de la app de escritorio: la marca a la izquierda; lo que espera y
+    // el estado de la sincronización a la derecha.
+    let top_bar = move || {
+        view()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .h(px(44.0))
+            .border_b_1()
+            .border_color(c(tokens::CARD_BORDER))
+            .bg(c(tokens::GROUND))
+            .child(view().w(px(10.0)).h(px(10.0)).bg(c(tokens::ACCENT)))
+            .child(text("Condx").text_size(px(15.0)).font_weight(FontWeight::MEDIUM))
+            .child(view().flex_1())
+            .child(dynamic(move || {
+                let n = waiting_count.get();
+                if screen.get() == Screen::Ready && n > 0 {
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .items_center()
+                        .px_2()
+                        .h(px(24.0))
+                        .border_1()
+                        .border_color(c(tokens::CARD_BORDER))
+                        .child(theme::dot(Health::Warn))
+                        .child(text(format!("{n} to approve")).text_size(px(12.0)))
+                        .into_element()
+                } else {
+                    view().into_element()
+                }
+            }))
+            .child(dynamic(move || {
+                let line = sync_line.get();
+                let health = match line.as_str() {
+                    "in sync" => Health::Ok,
+                    "offline" => Health::Bad,
+                    "" => Health::Unknown,
+                    _ => Health::Warn,
+                };
+                if screen.get() == Screen::Ready { status_tag(health, line).into_element() } else { view().into_element() }
+            }))
     };
 
     view()
         .flex_1()
-        .bg(move || theme().background)
-        .text_color(move || theme().foreground)
+        .bg(c(tokens::GROUND))
+        .text_color(c(tokens::FG))
+        .font_family(theme::UI_FONT)
+        .text_size(px(14.0))
         .child(
             safe_area_view().flex_1().child(
                 view()
                     .flex_1()
-                    .px_4()
-                    .pt_4()
-                    .gap_3()
-                    .child(text("Condx").text_size(px(28.0)))
-                    .child(text(move || status.get()).text_size(px(14.0)).text_color(move || theme().muted_foreground))
-                    .child(dynamic(move || match screen.get() {
-                        Screen::Loading => view().child(text("…")).into_element(),
-                        Screen::Pair => pair_view().into_element(),
-                        Screen::Waiting(fp) => view()
-                            .gap_3()
-                            .child(text("Confirm on your Mac").text_size(px(20.0)))
-                            .child(text("Check that the Mac shows this same key, then press Confirm there.").text_size(px(14.0)).text_color(move || theme().muted_foreground))
-                            .child(text(fp).text_size(px(24.0)))
-                            .into_element(),
-                        Screen::Ready => view()
+                    .child(top_bar())
+                    .child(
+                        view()
                             .flex_1()
-                            .gap_3()
-                            .child(text(move || format!("This phone · key {} · {}", fingerprint.get(), secure::backend())).text_size(px(12.0)).text_color(move || theme().muted_foreground))
-                            .child(scroll().flex_1().child(view().gap_3().pb_4().child(each(
-                                move || approvals.get(),
-                                |a: &Approval| format!("{}|{:?}|{:?}|{}|{}", a.job_id, a.decision, a.phone_result, a.pending, a.status),
-                                row.clone(),
-                            ))))
-                            .child(view().flex_row().pb_4().child(button("Unpair this phone", false, unpair.clone())))
-                            .into_element(),
-                    })),
+                            .bg(c(tokens::PANEL))
+                            .child(dynamic(move || {
+                                let notice = status.get();
+                                if notice.is_empty() { view().into_element() } else { view().px_4().pt_3().child(status_tag(Health::Bad, notice)).into_element() }
+                            }))
+                            .child(dynamic(move || match screen.get() {
+                                Screen::Loading => view().p_4().child(muted("…")).into_element(),
+                                Screen::Pair => view().p_4().child(pair_view()).into_element(),
+                                Screen::Waiting(fp) => view()
+                                    .p_4()
+                                    .gap_3()
+                                    .child(section("Confirm on your Mac"))
+                                    .child(
+                                        card()
+                                            .gap_3()
+                                            .child(muted("Check that the Mac shows this same key, then press Confirm there."))
+                                            .child(mono(fp, 22.0))
+                                            .child(status_tag(Health::Warn, "Waiting for the Mac…")),
+                                    )
+                                    .into_element(),
+                                Screen::Ready => scroll()
+                                    .flex_1()
+                                    .child(
+                                        view()
+                                            .p_4()
+                                            .gap_3()
+                                            .child(section("Approvals"))
+                                            .child(dynamic(move || {
+                                                if visible().is_empty() { card().child(muted("Nothing is waiting for your approval.")).into_element() } else { view().into_element() }
+                                            }))
+                                            .child(view().gap_3().child(each(
+                                                visible,
+                                                |a: &Approval| format!("{}|{:?}|{:?}|{}|{}", a.job_id, a.decision, a.phone_result, a.pending, a.status),
+                                                row.clone(),
+                                            )))
+                                            .child(view().pt_2().child(section("This phone")))
+                                            .child(
+                                                card()
+                                                    .child(kv("Key", mono(fingerprint.get(), 13.0)))
+                                                    .child(kv("Stored in", text(secure::backend()).text_size(px(13.0))))
+                                                    .child(view().flex_row().pt_1().child(theme::button("Unpair this phone", Variant::Outline, unpair.clone()))),
+                                            ),
+                                    )
+                                    .into_element(),
+                            })),
+                    ),
             ),
         )
 }

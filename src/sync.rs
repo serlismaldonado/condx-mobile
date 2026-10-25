@@ -22,6 +22,8 @@ pub struct Approval {
     pub status: String,
     pub level: String,
     pub requested_by: String,
+    /// Cuándo se pidió (ms; 0 si no se sabe).
+    pub created_at: i64,
     pub decision: Option<String>,
     /// Qué hizo el daemon con la decisión: `approved`, `rejected: …`, `needs-mac`.
     pub phone_result: Option<String>,
@@ -174,7 +176,8 @@ impl Phone {
             .map(|r| {
                 let own = r.row.values.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
                 let opt = |k: &str| if own { r.row.values.get(k).and_then(Value::as_str).map(str::to_string) } else { None };
-                (r.row.values.get("createdAt").and_then(Value::as_i64).unwrap_or(0), Approval {
+                let created_at = r.row.values.get("createdAt").and_then(Value::as_i64).unwrap_or(0);
+                (created_at, Approval {
                 job_id: r.row.id.clone(),
                 recipe: s(&r.row.values, "recipe"),
                 title: s(&r.row.values, "title"),
@@ -183,6 +186,7 @@ impl Phone {
                 status: s(&r.row.values, "status"),
                 level: s(&r.row.values, "approval"),
                 requested_by: s(&r.row.values, "requestedBy"),
+                created_at,
                 decision: opt("decision"),
                 phone_result: opt("phoneResult"),
                 pending: r.pending,
