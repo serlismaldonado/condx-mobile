@@ -8,6 +8,7 @@
 //!
 //! La red y el almacenamiento corren fuera del hilo de la interfaz (`blocking`).
 
+pub mod scan;
 pub mod secure;
 pub mod sync;
 pub mod theme;
@@ -161,6 +162,33 @@ pub fn App() -> impl IntoElement {
                 Ok(Err(e)) => status.set(e),
                 Err(_) => {}
             }
+        });
+    };
+
+    // Escanear el QR de la Mac: la cámara del sistema saca la foto y aquí se lee (scan.rs).
+    let scan_qr = move || {
+        spawn(async move {
+            match blocking(scan::start).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return status.set(e),
+                Err(_) => return,
+            }
+            status.set("Take a photo of the QR on the Mac…".into());
+            for _ in 0..180 {
+                timer(Duration::from_secs(1)).await;
+                match blocking(scan::poll).await {
+                    Ok(scan::Poll::Waiting) => continue,
+                    Ok(scan::Poll::Done(text)) => {
+                        pairing_text.set(text);
+                        status.set(String::new());
+                        return do_pair();
+                    }
+                    Ok(scan::Poll::Failed(e)) => return status.set(e),
+                    Err(_) => return,
+                }
+            }
+            let _ = blocking(scan::cancel).await;
+            status.set("No photo arrived. Try again.".into());
         });
     };
 
@@ -407,10 +435,15 @@ pub fn App() -> impl IntoElement {
             .child(
                 card()
                     .gap_3()
-                    .child(muted("On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Paste the QR's text, or type the code and the deployment URL."))
+                    .child(muted(if scan::supported() {
+                        "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Scan its QR, or type the code and the deployment URL."
+                    } else {
+                        "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Paste the QR's text, or type the code and the deployment URL."
+                    }))
+                    .child(dynamic(move || if scan::supported() { view().flex_row().child(theme::button("Scan the QR", Variant::Primary, scan_qr)).into_element() } else { view().into_element() }))
                     .child(field("Code (K7Q2-M9XD-4HWR) or the QR's text", pairing_text).auto_capitalize(AutoCapitalize::None))
                     .child(field("Deployment URL (only with a typed code)", pairing_url).auto_capitalize(AutoCapitalize::None).keyboard_type(KeyboardType::Url))
-                    .child(view().flex_row().child(theme::button("Pair", Variant::Primary, do_pair))),
+                    .child(view().flex_row().child(theme::button("Pair", if scan::supported() { Variant::Outline } else { Variant::Primary }, do_pair))),
             )
     };
 

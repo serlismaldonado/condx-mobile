@@ -83,7 +83,7 @@ mod platform {
 }
 
 #[cfg(target_os = "android")]
-mod platform {
+pub(crate) mod platform {
     //! Android Keystore por JNI. nsh no expone su JavaVM, pero Android 11+ la entrega por
     //! `JNI_GetCreatedJavaVMs` (libnativehelper); las clases del framework se encuentran desde un
     //! hilo nativo adjuntado.
@@ -94,7 +94,7 @@ mod platform {
     pub const NAME: &str = "Android Keystore";
     const ALIAS: &str = "condx-identity";
 
-    fn vm() -> Result<JavaVM, String> {
+    pub(crate) fn vm() -> Result<JavaVM, String> {
         type GetVms = unsafe extern "C" fn(*mut *mut jni::sys::JavaVM, jni::sys::jsize, *mut jni::sys::jsize) -> jni::sys::jint;
         unsafe {
             for lib in [c"libnativehelper.so", c"libart.so"] {
