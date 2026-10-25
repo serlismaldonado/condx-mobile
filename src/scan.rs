@@ -376,6 +376,15 @@ mod tests {
     }
 
     #[test]
+    fn lee_el_enlace_del_qr() {
+        let link = "https://condx-cloud.serlismaldonado.com/pair#d=https%3A%2F%2Fcondx-cloud.serlismaldonado.com&c=RXDU-W2QX-JUKT";
+        assert_eq!(decode(&photo(link, 6, 400)).unwrap(), link);
+        let (url, code) = crate::sync::parse_pairing(link, "").unwrap();
+        assert_eq!((url.as_str(), code.as_str()), ("https://condx-cloud.serlismaldonado.com", "RXDU-W2QX-JUKT"));
+        assert!(crate::sync::parse_pairing("https://x.example/pair#d=https%3A%2F%2Fx", "").is_err());
+    }
+
+    #[test]
     fn sin_qr_lo_dice() {
         let mut out = std::io::Cursor::new(Vec::new());
         image::GrayImage::from_pixel(300, 300, image::Luma([128])).write_to(&mut out, image::ImageFormat::Jpeg).unwrap();

@@ -478,7 +478,7 @@ pub fn App() -> impl IntoElement {
                 card()
                     .gap_3()
                     .child(muted(if scan::supported() {
-                        "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Scan its QR here. If it doesn't read it, scan it with your phone's camera or Lens, copy the text and paste it."
+                        "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Scan its QR here, or with your phone's camera: it opens a page with a Copy button, then tap “Paste the QR's text”."
                     } else {
                         "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Paste the QR's text, or type the code and the deployment URL."
                     }))

@@ -128,6 +128,31 @@ fn random_hex(bytes: usize) -> String {
 /// se pasa la URL aparte.
 pub fn parse_pairing(text: &str, url: &str) -> Result<(String, String), String> {
     let text = text.trim();
+    // El enlace del QR (`https://<sitio>/pair#d=<deployment>&c=<código>`).
+    if let Some((_, frag)) = text.split_once("/pair#").filter(|_| text.starts_with("http")) {
+        let decode = |s: &str| {
+            let b = s.as_bytes();
+            let mut out = Vec::with_capacity(b.len());
+            let mut i = 0;
+            while i < b.len() {
+                match (b[i], b.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok())) {
+                    (b'%', Some(v)) => {
+                        out.push(v);
+                        i += 3;
+                    }
+                    (c, _) => {
+                        out.push(c);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8_lossy(&out).to_string()
+        };
+        let get = |k: &str| frag.split('&').find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix('=')).map(decode));
+        let url = get("d").ok_or("the QR's link has no deployment URL")?;
+        let code = get("c").ok_or("the QR's link has no code")?;
+        return Ok((url, code));
+    }
     if let Ok(v) = serde_json::from_str::<Value>(text) {
         let url = v["url"].as_str().ok_or("the QR has no deployment URL")?;
         let code = v["code"].as_str().ok_or("the QR has no code")?;
