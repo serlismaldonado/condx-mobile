@@ -17,10 +17,14 @@ pub struct Approval {
     pub recipe: String,
     pub title: String,
     pub env: String,
+    /// `devbox`, `throwaway`, `cloud-dev` o `cloud-prod`.
+    pub env_kind: String,
     pub status: String,
     pub level: String,
     pub requested_by: String,
     pub decision: Option<String>,
+    /// Qué hizo el daemon con la decisión: `approved`, `rejected: …`, `needs-mac`.
+    pub phone_result: Option<String>,
     pub pending: bool,
 }
 
@@ -59,6 +63,70 @@ pub fn verify_decision(daemon_id: &str, job_id: &str, row: &Values, device_key: 
     Ok(decision.to_string())
 }
 
+/// Llama a una función pública de Condx Cloud (vincular).
+fn call(url: &str, kind: &str, path: &str, args: Value) -> Result<Value, String> {
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20)).build();
+    let reply: Value = match agent.post(&format!("{}/api/{kind}", url.trim_end_matches('/'))).send_json(json!({ "path": path, "args": args, "format": "json" })) {
+        Ok(r) => r.into_json().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(_, r)) => r.into_json().unwrap_or(Value::Null),
+        Err(e) => return Err(format!("couldn't reach Condx Cloud: {e}")),
+    };
+    if reply["status"] == "success" {
+        return Ok(reply["value"].clone());
+    }
+    Err(reply["errorData"]["message"].as_str().map(str::to_string).unwrap_or_else(|| reply["errorMessage"].as_str().unwrap_or("error").lines().next().unwrap_or("error").to_string()))
+}
+
+fn random_hex(bytes: usize) -> String {
+    let mut buf = vec![0u8; bytes];
+    rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut buf);
+    hex(&buf)
+}
+
+/// Lo que trae el QR de la Mac: `{"condx":1,"url":…,"code":…}`. También acepta solo el código si
+/// se pasa la URL aparte.
+pub fn parse_pairing(text: &str, url: &str) -> Result<(String, String), String> {
+    let text = text.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        let url = v["url"].as_str().ok_or("the QR has no deployment URL")?;
+        let code = v["code"].as_str().ok_or("the QR has no code")?;
+        return Ok((url.to_string(), code.to_string()));
+    }
+    if url.trim().is_empty() {
+        return Err("type the deployment URL too (it's in the Mac's Settings)".into());
+    }
+    Ok((url.trim().to_string(), text.to_string()))
+}
+
+/// Reclama el código: genera la llave y el token del teléfono y queda pendiente de confirmación en
+/// la Mac. Devuelve la identidad a guardar (todavía sin permisos).
+pub fn pair(url: &str, code: &str, name: &str) -> Result<crate::secure::Identity, String> {
+    let key = SigningKey::generate(&mut rand_core::OsRng);
+    let token = random_hex(32);
+    let v = call(url, "mutation", "pairing:claim", json!({ "code": code, "publicKey": hex(key.verifying_key().as_bytes()), "token": token, "name": name }))?;
+    Ok(crate::secure::Identity {
+        url: url.trim_end_matches('/').to_string(),
+        daemon_id: v["daemonId"].as_str().ok_or("unexpected answer")?.to_string(),
+        device_id: v["deviceId"].as_str().ok_or("unexpected answer")?.to_string(),
+        name: name.to_string(),
+        token,
+        seed: hex(key.as_bytes()),
+    })
+}
+
+/// `pending`, `active` o `revoked` (según el backend; la confianza real la tiene la Mac).
+pub fn device_status(identity: &crate::secure::Identity) -> Result<String, String> {
+    let v = call(&identity.url, "query", "pairing:me", json!({ "token": identity.token }))?;
+    Ok(v["status"].as_str().unwrap_or("unknown").to_string())
+}
+
+/// Huella corta de la llave del teléfono (la misma que muestra la Mac).
+pub fn fingerprint_of(identity: &crate::secure::Identity) -> String {
+    let seed: Option<[u8; 32]> = unhex(&identity.seed).and_then(|b| b.try_into().ok());
+    let pk = seed.map(|s| hex(SigningKey::from_bytes(&s).verifying_key().as_bytes())).unwrap_or_default();
+    pk.chars().take(12).collect::<Vec<_>>().chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
+}
+
 pub struct Phone {
     pub daemon_id: String,
     pub key: SigningKey,
@@ -70,7 +138,8 @@ pub struct Phone {
 pub type Shared = Arc<Mutex<Phone>>;
 
 impl Phone {
-    pub fn open(url: &str, token: &str, daemon_id: &str) -> Result<Self, String> {
+    /// Con la identidad guardada (Keychain/Keystore): la llave, el token y a qué daemon pertenece.
+    pub fn open(identity: &crate::secure::Identity) -> Result<Self, String> {
         let (replica, outbox) = sqlite::open_in_memory().map_err(|e| e.to_string())?;
         let mut n = 0u64;
         let mut engine = Engine::open(replica, outbox, EngineConfig { backoff_base_ms: 200, backoff_max_ms: 5000, ..Default::default() }, move || {
@@ -78,9 +147,10 @@ impl Phone {
             format!("phone-{}-{n}", now_ms())
         })
         .map_err(|e| e.to_string())?;
-        let scope = format!("approvals:{daemon_id}");
+        let scope = format!("approvals:{}", identity.daemon_id);
         engine.enable_scope(&scope, None).map_err(|e| e.to_string())?;
-        Ok(Self { daemon_id: daemon_id.into(), key: SigningKey::generate(&mut rand_core::OsRng), engine, transport: ConvexHttpTransport::new(url, token), scope })
+        let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
@@ -95,28 +165,37 @@ impl Phone {
 
     pub fn approvals(&self) -> Vec<Approval> {
         let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
-        let mut list: Vec<Approval> = self
+        // La fila es del daemon: otro teléfono pudo dejar su decisión. Solo cuenta la de esta llave.
+        let mine = hex(self.key.verifying_key().as_bytes());
+        let mut list: Vec<(i64, Approval)> = self
             .engine
             .rows(&self.scope)
             .into_iter()
-            .map(|r| Approval {
+            .map(|r| {
+                let own = r.row.values.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
+                let opt = |k: &str| if own { r.row.values.get(k).and_then(Value::as_str).map(str::to_string) } else { None };
+                (r.row.values.get("createdAt").and_then(Value::as_i64).unwrap_or(0), Approval {
                 job_id: r.row.id.clone(),
                 recipe: s(&r.row.values, "recipe"),
                 title: s(&r.row.values, "title"),
                 env: s(&r.row.values, "env"),
+                env_kind: s(&r.row.values, "envKind"),
                 status: s(&r.row.values, "status"),
                 level: s(&r.row.values, "approval"),
                 requested_by: s(&r.row.values, "requestedBy"),
-                decision: r.row.values.get("decision").and_then(Value::as_str).map(str::to_string),
+                decision: opt("decision"),
+                phone_result: opt("phoneResult"),
                 pending: r.pending,
             })
+            })
             .collect();
-        list.sort_by_key(|a| (a.status != "waiting-approval", a.job_id.clone()));
-        list
+        // Pendientes primero; dentro de cada grupo, lo más reciente arriba.
+        list.sort_by_key(|(at, a)| (a.status != "waiting-approval", std::cmp::Reverse(*at), a.job_id.clone()));
+        list.into_iter().map(|(_, a)| a).collect()
     }
 
     /// Decide sobre un trabajo: la decisión firmada entra a la outbox (y sale en el próximo sync).
-    pub fn decide(&mut self, job_id: &str, approve: bool) -> Result<(), String> {
+    pub fn decide(&mut self, job_id: &str, approve: bool, confirm: Option<String>) -> Result<(), String> {
         let decision = if approve { "approve" } else { "reject" };
         let at = now_ms();
         let signature = self.key.sign(decision_message(&self.daemon_id, job_id, decision, at).as_bytes());
@@ -125,6 +204,9 @@ impl Phone {
         set.insert("decidedAt".into(), json!(at));
         set.insert("deviceKey".into(), json!(hex(self.key.verifying_key().as_bytes())));
         set.insert("signature".into(), json!(hex(&signature.to_bytes())));
+        if let Some(text) = confirm {
+            set.insert("confirmText".into(), json!(text));
+        }
         self.engine.commit(vec![OpDraft::patch(&self.scope, job_id, set)], at).map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -134,8 +216,10 @@ impl Phone {
         self.engine.confirmed_row(&self.scope, job_id).map(|r| r.values.clone())
     }
 
-    pub fn fingerprint(&self) -> String {
-        hex(&self.key.verifying_key().as_bytes()[..6])
+
+    /// Lo que no llegó (rechazos y conflictos del servidor), para mostrarlo.
+    pub fn recovery(&self) -> Vec<String> {
+        self.engine.recovery_items().iter().map(|r| format!("{:?} {}: {}", r.kind, r.group.ops.first().map(|o| o.row_id.as_str()).unwrap_or("?"), r.error.as_ref().map(|e| e.message.as_str()).unwrap_or_else(|| if r.conflicts.is_some() { "conflict" } else { "" }))).collect()
     }
 
     pub fn pending_changes(&self) -> usize {

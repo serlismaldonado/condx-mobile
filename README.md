@@ -1,5 +1,22 @@
 # condx-mobile
 
+Condx on the phone: pair it with your Mac and approve (or reject) what's waiting for your approval.
+Native Shell (Rust); the design is in Condx's `docs/design/cloud.md` (phase C4).
+
+- `src/sync.rs`: pairing, the local-first engine (`localfirst-core`) and signed decisions.
+- `src/secure.rs`: the phone's identity in the Keychain (iOS) or the Keystore (Android).
+- `src/lib.rs`: the screens (pair → confirm on the Mac → approvals).
+
+```sh
+nsh run --target android               # emulator (adb reverse the Cloud's port for a local backend)
+scripts/ios-sim-install.sh             # iOS simulator, with the Keychain entitlement
+CONDX_DAEMON_URL=http://127.0.0.1:4799 CONDX_APP_TOKEN=… cargo test --test live -- --ignored
+```
+
+The live tests need a throwaway `condxd` linked to a throwaway Condx Cloud, never a real one.
+
+## Native Shell template notes
+
 An app written in Rust: its UI is `src/lib.rs`, and `nsh.json` names the root component (`"root": "App"`).
 
 ```sh
