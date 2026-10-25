@@ -110,8 +110,91 @@ mod platform {
         format!("camera: {e}")
     }
 
+    /// El error de un paso, con la excepción de Java si la hubo (clase y mensaje), y al log.
+    fn jx(env: &mut JNIEnv<'_>, step: &str, e: jni::errors::Error) -> String {
+        let mut detail = e.to_string();
+        if matches!(e, jni::errors::Error::JavaException) {
+            if let Ok(ex) = env.exception_occurred() {
+                let _ = env.exception_clear();
+                if let Ok(s) = env.call_method(&ex, "toString", "()Ljava/lang/String;", &[]).and_then(|v| v.l()) {
+                    if let Ok(text) = env.get_string(&s.into()) {
+                        detail = String::from(text);
+                    }
+                }
+            }
+        }
+        let _ = env.exception_clear();
+        log::error!("scan: {step}: {detail}");
+        format!("{step}: {detail}")
+    }
+
+    /// `Ok(valor)` o devuelve el error del paso con la excepción de Java.
+    macro_rules! j {
+        ($env:ident, $step:expr, $call:expr) => {{
+            let r = $call;
+            match r {
+                Ok(v) => v,
+                Err(e) => return Err(jx($env, $step, e)),
+            }
+        }};
+    }
+
     fn context<'a>(env: &mut JNIEnv<'a>) -> Result<JObject<'a>, String> {
-        env.call_static_method("android/app/ActivityThread", "currentApplication", "()Landroid/app/Application;", &[]).and_then(|v| v.l()).map_err(jerr)
+        let app = env.call_static_method("android/app/ActivityThread", "currentApplication", "()Landroid/app/Application;", &[]).and_then(|v| v.l());
+        match app {
+            Ok(a) if !a.is_null() => Ok(a),
+            other => {
+                if let Err(e) = other {
+                    let _ = jx(env, "app context", e);
+                }
+                let at = j!(env, "app context", env.call_static_method("android/app/ActivityThread", "currentActivityThread", "()Landroid/app/ActivityThread;", &[]).and_then(|v| v.l()));
+                Ok(j!(env, "app context", env.call_method(&at, "getApplication", "()Landroid/app/Application;", &[]).and_then(|v| v.l())))
+            }
+        }
+    }
+
+    /// Una fila de MediaStore para la foto: la tabla de siempre o, si falla, la del volumen principal.
+    fn new_row<'a>(env: &mut JNIEnv<'a>, res: &JObject<'a>) -> Result<JObject<'a>, String> {
+        let values = j!(env, "photo row", env.new_object("android/content/ContentValues", "()V", &[]));
+        for (k, v) in [("_display_name", "condx-pairing.jpg"), ("mime_type", "image/jpeg")] {
+            let (k, v) = (j!(env, "photo row", env.new_string(k)), j!(env, "photo row", env.new_string(v)));
+            j!(env, "photo row", env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&k), JValue::Object(&v)]));
+        }
+        let mut last = String::from("photo row: no table");
+        for vol in [None, Some("external_primary"), Some("external")] {
+            let table = match vol {
+                None => env.get_static_field("android/provider/MediaStore$Images$Media", "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;").and_then(|v| v.l()),
+                Some(v) => match env.new_string(v) {
+                    Ok(name) => env.call_static_method("android/provider/MediaStore$Images$Media", "getContentUri", "(Ljava/lang/String;)Landroid/net/Uri;", &[JValue::Object(&name)]).and_then(|v| v.l()),
+                    Err(e) => Err(e),
+                },
+            };
+            let table = match table {
+                Ok(t) => t,
+                Err(e) => {
+                    last = jx(env, "photo row", e);
+                    continue;
+                }
+            };
+            match env.call_method(res, "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;", &[JValue::Object(&table), JValue::Object(&values)]).and_then(|v| v.l()) {
+                Ok(uri) if !uri.is_null() => return Ok(uri),
+                Ok(_) => last = "photo row: MediaStore gave no row".into(),
+                Err(e) => last = jx(env, "photo row", e),
+            }
+        }
+        Err(last)
+    }
+
+    /// Abre la cámara sola (sin foto de vuelta): su lector de QR muestra el texto para copiarlo.
+    pub fn open_camera_app() -> Result<(), String> {
+        with_env(|env| {
+            let ctx = context(env)?;
+            let action = j!(env, "camera", env.new_string("android.media.action.STILL_IMAGE_CAMERA"));
+            let intent = j!(env, "camera", env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)]));
+            j!(env, "camera", env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(0x1000_0000)]));
+            j!(env, "open the camera", env.call_method(&ctx, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)]));
+            Ok(())
+        })
     }
 
     fn resolver<'a>(env: &mut JNIEnv<'a>) -> Result<JObject<'a>, String> {
@@ -137,31 +220,27 @@ mod platform {
     pub fn start() -> Result<(), String> {
         cancel();
         let uri = with_env(|env| {
-            let values = env.new_object("android/content/ContentValues", "()V", &[]).map_err(jerr)?;
-            for (k, v) in [("_display_name", "condx-pairing.jpg"), ("mime_type", "image/jpeg")] {
-                let (k, v) = (env.new_string(k).map_err(jerr)?, env.new_string(v).map_err(jerr)?);
-                env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&k), JValue::Object(&v)]).map_err(jerr)?;
-            }
-            let table = env.get_static_field("android/provider/MediaStore$Images$Media", "EXTERNAL_CONTENT_URI", "Landroid/net/Uri;").and_then(|v| v.l()).map_err(jerr)?;
-            let res = resolver(env)?;
-            let uri = env.call_method(&res, "insert", "(Landroid/net/Uri;Landroid/content/ContentValues;)Landroid/net/Uri;", &[JValue::Object(&table), JValue::Object(&values)]).and_then(|v| v.l()).map_err(jerr)?;
-            if uri.is_null() {
-                return Err("couldn't make room for the photo".into());
-            }
-            let action = env.new_string("android.media.action.IMAGE_CAPTURE").map_err(jerr)?;
-            let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)]).map_err(jerr)?;
-            let extra = env.new_string("output").map_err(jerr)?;
-            env.call_method(&intent, "putExtra", "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;", &[JValue::Object(&extra), JValue::Object(&uri)]).map_err(jerr)?;
-            // NEW_TASK (se lanza desde la Application) y permiso de escribir y leer esa fila.
-            env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(0x1000_0000 | 0x2 | 0x1)]).map_err(jerr)?;
             let ctx = context(env)?;
-            if env.call_method(&ctx, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)]).is_err() {
-                let _ = env.exception_clear();
+            let res = j!(env, "content resolver", env.call_method(&ctx, "getContentResolver", "()Landroid/content/ContentResolver;", &[]).and_then(|v| v.l()));
+            let uri = new_row(env, &res)?;
+            let drop_row = |env: &mut JNIEnv<'_>| {
                 let _ = env.call_method(&res, "delete", "(Landroid/net/Uri;Ljava/lang/String;[Ljava/lang/String;)I", &[JValue::Object(&uri), JValue::Object(&JObject::null()), JValue::Object(&JObject::null())]);
-                return Err("this phone has no camera app to take the photo".into());
+                let _ = env.exception_clear();
+            };
+            let action = j!(env, "camera intent", env.new_string("android.media.action.IMAGE_CAPTURE"));
+            let intent = j!(env, "camera intent", env.new_object("android/content/Intent", "(Ljava/lang/String;)V", &[JValue::Object(&action)]));
+            let extra = j!(env, "camera intent", env.new_string("output"));
+            j!(env, "camera intent", env.call_method(&intent, "putExtra", "(Ljava/lang/String;Landroid/os/Parcelable;)Landroid/content/Intent;", &[JValue::Object(&extra), JValue::Object(&uri)]));
+            // NEW_TASK (se lanza desde la Application) y permiso de escribir y leer esa fila.
+            j!(env, "camera intent", env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(0x1000_0000 | 0x2 | 0x1)]));
+            if let Err(e) = env.call_method(&ctx, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)]) {
+                let msg = jx(env, "open the camera", e);
+                drop_row(env);
+                return Err(msg);
             }
-            let s = env.call_method(&uri, "toString", "()Ljava/lang/String;", &[]).and_then(|v| v.l()).map_err(jerr)?;
-            Ok(String::from(env.get_string(&s.into()).map_err(jerr)?))
+            let s: jni::objects::JString = j!(env, "photo row", env.call_method(&uri, "toString", "()Ljava/lang/String;", &[]).and_then(|v| v.l())).into();
+            let text = j!(env, "photo row", env.get_string(&s).map(String::from));
+            Ok(text)
         })?;
         if let Some(f) = pending_file() {
             let _ = std::fs::write(f, &uri);
@@ -249,9 +328,12 @@ mod platform {
     pub fn clipboard() -> Result<String, String> {
         Err("paste the QR's text in the field".into())
     }
+    pub fn open_camera_app() -> Result<(), String> {
+        Err("no camera here".into())
+    }
 }
 
-pub use platform::{cancel, clipboard, pending, poll, start};
+pub use platform::{cancel, clipboard, open_camera_app, pending, poll, start};
 
 #[cfg(test)]
 mod tests {

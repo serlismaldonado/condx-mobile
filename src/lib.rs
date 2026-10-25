@@ -201,7 +201,11 @@ pub fn App() -> impl IntoElement {
         spawn(async move {
             match blocking(scan::start).await {
                 Ok(Ok(())) => watch_scan(),
-                Ok(Err(e)) => status.set(e),
+                // Sin la foto de vuelta: la cámara sola, cuyo lector de QR deja copiar el texto.
+                Ok(Err(e)) => match blocking(scan::open_camera_app).await {
+                    Ok(Ok(())) => status.set(format!("Couldn't get the photo back ({e}). In the camera, point at the QR, copy the text it shows, come back and tap “Paste the QR's text”.")),
+                    _ => status.set(format!("{e}. Scan the QR with your camera or Lens, copy the text and tap “Paste the QR's text”.")),
+                },
                 Err(_) => {}
             }
         });

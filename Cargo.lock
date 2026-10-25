@@ -2272,6 +2272,7 @@ dependencies = [
  "jni",
  "libc",
  "localfirst-core",
+ "log",
  "nsh-base",
  "nsh-core",
  "nsh-platform-linux",
