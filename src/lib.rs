@@ -165,32 +165,70 @@ pub fn App() -> impl IntoElement {
         });
     };
 
-    // Escanear el QR de la Mac: la cámara del sistema saca la foto y aquí se lee (scan.rs).
-    let scan_qr = move || {
+    // Escanear el QR de la Mac: la cámara del sistema saca la foto y aquí se lee (scan.rs). Si
+    // Android cerró la app mientras la cámara estaba abierta, el escaneo sigue al volver.
+    let scanning = signal(false);
+    let watch_scan = move || {
         spawn(async move {
-            match blocking(scan::start).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => return status.set(e),
-                Err(_) => return,
-            }
+            scanning.set(true);
             status.set("Take a photo of the QR on the Mac…".into());
             for _ in 0..180 {
                 timer(Duration::from_secs(1)).await;
+                if !scanning.get() {
+                    return;
+                }
                 match blocking(scan::poll).await {
                     Ok(scan::Poll::Waiting) => continue,
                     Ok(scan::Poll::Done(text)) => {
+                        scanning.set(false);
                         pairing_text.set(text);
                         status.set(String::new());
                         return do_pair();
                     }
-                    Ok(scan::Poll::Failed(e)) => return status.set(e),
-                    Err(_) => return,
+                    Ok(scan::Poll::Failed(e)) => {
+                        scanning.set(false);
+                        return status.set(e);
+                    }
+                    Err(_) => break,
                 }
             }
             let _ = blocking(scan::cancel).await;
-            status.set("No photo arrived. Try again.".into());
+            scanning.set(false);
+            status.set("No photo arrived. Try again, or use “Paste the QR's text”.".into());
         });
     };
+    let scan_qr = move || {
+        spawn(async move {
+            match blocking(scan::start).await {
+                Ok(Ok(())) => watch_scan(),
+                Ok(Err(e)) => status.set(e),
+                Err(_) => {}
+            }
+        });
+    };
+    let cancel_scan = move || {
+        scanning.set(false);
+        status.set(String::new());
+        spawn(async move {
+            let _ = blocking(scan::cancel).await;
+        });
+    };
+    // La cámara del teléfono (o Lens) lee el QR y copia su texto; aquí se pega y se vincula.
+    let paste_qr = move || {
+        spawn(async move {
+            match blocking(scan::clipboard).await {
+                Ok(Ok(text)) => {
+                    pairing_text.set(text);
+                    do_pair();
+                }
+                Ok(Err(e)) => status.set(e),
+                Err(_) => {}
+            }
+        });
+    };
+    if scan::supported() && scan::pending() {
+        watch_scan();
+    }
 
     let decide = {
         let slot = slot.clone();
@@ -436,11 +474,23 @@ pub fn App() -> impl IntoElement {
                 card()
                     .gap_3()
                     .child(muted(if scan::supported() {
-                        "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Scan its QR, or type the code and the deployment URL."
+                        "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Scan its QR here. If it doesn't read it, scan it with your phone's camera or Lens, copy the text and paste it."
                     } else {
                         "On the Mac: Condx → Settings → Condx Cloud → Pair a phone. Paste the QR's text, or type the code and the deployment URL."
                     }))
-                    .child(dynamic(move || if scan::supported() { view().flex_row().child(theme::button("Scan the QR", Variant::Primary, scan_qr)).into_element() } else { view().into_element() }))
+                    .child(dynamic(move || {
+                        if !scan::supported() {
+                            view().into_element()
+                        } else if scanning.get() {
+                            view().flex_row().child(theme::button("Cancel the scan", Variant::Outline, cancel_scan)).into_element()
+                        } else {
+                            view()
+                                .gap_2()
+                                .child(view().flex_row().child(theme::button("Scan the QR", Variant::Primary, scan_qr)))
+                                .child(view().flex_row().child(theme::button("Paste the QR's text", Variant::Outline, paste_qr)))
+                                .into_element()
+                        }
+                    }))
                     .child(field("Code (K7Q2-M9XD-4HWR) or the QR's text", pairing_text).auto_capitalize(AutoCapitalize::None))
                     .child(field("Deployment URL (only with a typed code)", pairing_url).auto_capitalize(AutoCapitalize::None).keyboard_type(KeyboardType::Url))
                     .child(view().flex_row().child(theme::button("Pair", if scan::supported() { Variant::Outline } else { Variant::Primary }, do_pair))),

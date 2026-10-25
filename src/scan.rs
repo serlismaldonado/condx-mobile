@@ -3,7 +3,9 @@
 //! nsh 0.2 no trae cámara ni deja pedir permisos o declarar intents en el manifiesto. En Android se
 //! abre la cámara del sistema (`ACTION_IMAGE_CAPTURE`) con la foto hacia una fila propia de
 //! MediaStore: así no hace falta el permiso CAMERA (la foto la toma la app de cámara) y la app la lee
-//! al volver. El QR se decodifica aquí, en Rust (`rqrr`), y la foto se borra.
+//! al volver (también si Android cerró la app mientras tanto). El QR se decodifica aquí, en Rust
+//! (rxing y, si no, rqrr), y la foto se borra. Si la cámara del teléfono no devuelve la foto, la
+//! suya (o Lens) lee el QR y copia el texto: «Paste the QR's text» lo toma del portapapeles.
 //! En iOS falta: la cámara pide `NSCameraUsageDescription` en el Info.plist, que nsh 0.2 no deja
 //! declarar; ahí sigue pegar el texto del QR.
 
@@ -22,27 +24,35 @@ pub enum Poll {
     Failed(String),
 }
 
-/// Lee el QR de una foto (JPEG o PNG). Prueba primero reducida (más rápido, y en fotos grandes
-/// rqrr encuentra mejor los patrones) y después más grande.
+fn scaled(img: &image::GrayImage, max: u32) -> Option<image::GrayImage> {
+    let (w, h) = img.dimensions();
+    if w.max(h) <= max {
+        return None;
+    }
+    let k = max as f32 / w.max(h) as f32;
+    Some(image::imageops::resize(img, (w as f32 * k) as u32, (h as f32 * k) as u32, image::imageops::FilterType::Triangle))
+}
+
+/// ZXing (rxing): el que mejor lee fotos de una pantalla (moiré, desenfoque, perspectiva).
+fn with_rxing(img: &image::GrayImage) -> Option<String> {
+    let mut hints = rxing::DecodeHints::default().with(rxing::DecodeHintValue::TryHarder(true)).with(rxing::DecodeHintValue::PossibleFormats([rxing::BarcodeFormat::QR_CODE].into_iter().collect()));
+    rxing::helpers::detect_in_luma_with_hints(img.as_raw().clone(), img.width(), img.height(), None, &mut hints).ok().map(|r| r.getText().to_string())
+}
+
+fn with_rqrr(img: &image::GrayImage) -> Option<String> {
+    let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(img.width() as usize, img.height() as usize, |x, y| img.get_pixel(x as u32, y as u32).0[0]);
+    prepared.detect_grids().into_iter().find_map(|g| g.decode().ok().map(|(_, t)| t))
+}
+
+/// Lee el QR de una foto (JPEG o PNG). Una foto del teléfono tiene 12 MP o más: se busca en varias
+/// escalas (reducida es más rápido y suaviza el moiré; grande sirve si el QR salió pequeño), primero
+/// con rxing y, si no, con rqrr. En 40 fotos sintéticas de la pantalla, rxing leyó 39 y rqrr 34.
 pub fn decode(bytes: &[u8]) -> Result<String, String> {
-    let img = image::load_from_memory(bytes).map_err(|e| format!("couldn't read the photo: {e}"))?.to_luma8();
-    for max in [1200u32, 2400] {
-        let (w, h) = img.dimensions();
-        let scaled = if w.max(h) > max {
-            let k = max as f32 / w.max(h) as f32;
-            image::imageops::resize(&img, (w as f32 * k) as u32, (h as f32 * k) as u32, image::imageops::FilterType::Triangle)
-        } else {
-            img.clone()
-        };
-        let mut prepared = rqrr::PreparedImage::prepare_from_greyscale(scaled.width() as usize, scaled.height() as usize, |x, y| scaled.get_pixel(x as u32, y as u32).0[0]);
-        for grid in prepared.detect_grids() {
-            if let Ok((_, text)) = grid.decode() {
-                return Ok(text);
-            }
-        }
-        if w.max(h) <= max {
-            break;
-        }
+    let img = image::load_from_memory(bytes).map_err(|e| format!("couldn't read the photo ({e}); try “Paste the QR's text”"))?.to_luma8();
+    let sizes: Vec<image::GrayImage> = [1000u32, 1600, 2400].iter().filter_map(|m| scaled(&img, *m)).collect();
+    let all = || sizes.iter().chain(std::iter::once(&img));
+    if let Some(t) = all().find_map(with_rxing).or_else(|| all().find_map(with_rqrr)) {
+        return Ok(t);
     }
     Err("there's no QR in the photo: take it again, closer and in focus".into())
 }
@@ -57,8 +67,44 @@ mod platform {
     use super::Poll;
 
     /// La fila de MediaStore que espera la foto y cuántos bytes tenía la vez anterior (para no
-    /// decodificar una foto a medio escribir).
+    /// decodificar una foto a medio escribir). También va a un archivo: Android puede cerrar la app
+    /// mientras la cámara está abierta, y al volver el escaneo sigue.
     static PENDING: Mutex<Option<(String, usize)>> = Mutex::new(None);
+
+    fn pending_file() -> Option<std::path::PathBuf> {
+        let cmdline = std::fs::read("/proc/self/cmdline").ok()?;
+        let package = String::from_utf8_lossy(cmdline.split(|b| *b == 0).next().unwrap_or_default()).to_string();
+        Some(std::path::PathBuf::from(format!("/data/data/{package}/files/scan-pending.txt")))
+    }
+
+    fn load() -> Option<(String, usize)> {
+        let mut p = PENDING.lock().unwrap();
+        if p.is_none() {
+            *p = pending_file().and_then(|f| std::fs::read_to_string(f).ok()).map(|u| u.trim().to_string()).filter(|u| u.starts_with("content://")).map(|u| (u, 0));
+        }
+        p.clone()
+    }
+
+    pub fn pending() -> bool {
+        load().is_some()
+    }
+
+    /// El texto del portapapeles (la cámara del teléfono o Lens leen el QR y lo copian).
+    pub fn clipboard() -> Result<String, String> {
+        with_env(|env| {
+            let ctx = context(env)?;
+            let name = env.new_string("clipboard").map_err(jerr)?;
+            let cm = env.call_method(&ctx, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", &[JValue::Object(&name)]).and_then(|v| v.l()).map_err(jerr)?;
+            let clip = env.call_method(&cm, "getPrimaryClip", "()Landroid/content/ClipData;", &[]).and_then(|v| v.l()).map_err(jerr)?;
+            if clip.is_null() {
+                return Err("the clipboard is empty: copy the QR's text first".into());
+            }
+            let item = env.call_method(&clip, "getItemAt", "(I)Landroid/content/ClipData$Item;", &[JValue::Int(0)]).and_then(|v| v.l()).map_err(jerr)?;
+            let text = env.call_method(&item, "coerceToText", "(Landroid/content/Context;)Ljava/lang/CharSequence;", &[JValue::Object(&ctx)]).and_then(|v| v.l()).map_err(jerr)?;
+            let s = env.call_method(&text, "toString", "()Ljava/lang/String;", &[]).and_then(|v| v.l()).map_err(jerr)?;
+            Ok(String::from(env.get_string(&s.into()).map_err(jerr)?))
+        })
+    }
 
     fn jerr(e: jni::errors::Error) -> String {
         format!("camera: {e}")
@@ -117,6 +163,9 @@ mod platform {
             let s = env.call_method(&uri, "toString", "()Ljava/lang/String;", &[]).and_then(|v| v.l()).map_err(jerr)?;
             Ok(String::from(env.get_string(&s.into()).map_err(jerr)?))
         })?;
+        if let Some(f) = pending_file() {
+            let _ = std::fs::write(f, &uri);
+        }
         *PENDING.lock().unwrap() = Some((uri, 0));
         Ok(())
     }
@@ -147,7 +196,7 @@ mod platform {
     }
 
     pub fn poll() -> Poll {
-        let Some((uri, last)) = PENDING.lock().unwrap().clone() else { return Poll::Failed("no scan in progress".into()) };
+        let Some((uri, last)) = load() else { return Poll::Failed("no scan in progress".into()) };
         let bytes = match read(&uri) {
             Ok(b) => b,
             Err(e) => return Poll::Failed(e),
@@ -169,6 +218,10 @@ mod platform {
 
     /// Borra la fila (con o sin foto).
     pub fn cancel() {
+        let _ = load();
+        if let Some(f) = pending_file() {
+            let _ = std::fs::remove_file(f);
+        }
         let Some((uri, _)) = PENDING.lock().unwrap().take() else { return };
         let _ = with_env(|env| {
             let res = resolver(env)?;
@@ -190,9 +243,15 @@ mod platform {
         Poll::Failed("scanning isn't available here".into())
     }
     pub fn cancel() {}
+    pub fn pending() -> bool {
+        false
+    }
+    pub fn clipboard() -> Result<String, String> {
+        Err("paste the QR's text in the field".into())
+    }
 }
 
-pub use platform::{cancel, poll, start};
+pub use platform::{cancel, clipboard, pending, poll, start};
 
 #[cfg(test)]
 mod tests {
@@ -224,6 +283,14 @@ mod tests {
         assert_eq!(decode(&photo(text, 6, 400)).unwrap(), text);
         assert_eq!(decode(&photo(text, 40, 3000)).unwrap(), text);
         assert_eq!(crate::sync::parse_pairing(&decode(&photo(text, 6, 400)).unwrap(), "").unwrap().0, "https://condx-cloud.serlismaldonado.com");
+    }
+
+    /// Una foto sintética de la pantalla de la Mac (perspectiva, giro, moiré, ruido, desenfoque)
+    /// que rqrr solo no leía.
+    #[test]
+    fn lee_una_foto_dificil_de_la_pantalla() {
+        let photo = include_bytes!("../tests/fixtures/qr-screen-photo.jpg");
+        assert_eq!(decode(photo).unwrap(), r#"{"condx":1,"url":"https://condx-cloud.serlismaldonado.com","code":"RXDU-W2QX-JUKT"}"#);
     }
 
     #[test]

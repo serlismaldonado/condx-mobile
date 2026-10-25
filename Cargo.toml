@@ -23,6 +23,7 @@ age = { version = "0.12", features = ["armor"] }
 # Leer el QR de la Mac en una foto (scan.rs).
 rqrr = { version = "0.11", default-features = false }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+rxing = { version = "0.9", default-features = false, features = ["decoders", "encoding_rs", "qrcode"] }
 
 # Dónde vive la identidad del teléfono: Keychain en iOS, Keystore en Android (en el escritorio, un archivo de prueba).
 [target.'cfg(target_os = "ios")'.dependencies]
