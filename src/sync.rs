@@ -30,6 +30,18 @@ pub struct Approval {
     pub pending: bool,
 }
 
+/// Un proveedor cuya clave el daemon cifró para este teléfono.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderKey {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub model: String,
+    pub key_hint: String,
+    /// Se descifra con la identidad de este teléfono.
+    pub opens: bool,
+}
+
 /// Un incidente como lo ve el teléfono.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Incident {
@@ -130,9 +142,13 @@ pub fn parse_pairing(text: &str, url: &str) -> Result<(String, String), String> 
 /// Reclama el código: genera la llave y el token del teléfono y queda pendiente de confirmación en
 /// la Mac. Devuelve la identidad a guardar (todavía sin permisos).
 pub fn pair(url: &str, code: &str, name: &str) -> Result<crate::secure::Identity, String> {
+    use age::secrecy::ExposeSecret;
     let key = SigningKey::generate(&mut rand_core::OsRng);
     let token = random_hex(32);
-    let v = call(url, "mutation", "pairing:claim", json!({ "code": code, "publicKey": hex(key.verifying_key().as_bytes()), "token": token, "name": name }))?;
+    // Para recibir las claves de los proveedores cifradas (solo este teléfono las abre).
+    let enc = age::x25519::Identity::generate();
+    let recipient = enc.to_public().to_string();
+    let v = call(url, "mutation", "pairing:claim", json!({ "code": code, "publicKey": hex(key.verifying_key().as_bytes()), "token": token, "name": name, "encryptionKey": recipient }))?;
     Ok(crate::secure::Identity {
         url: url.trim_end_matches('/').to_string(),
         daemon_id: v["daemonId"].as_str().ok_or("unexpected answer")?.to_string(),
@@ -140,6 +156,7 @@ pub fn pair(url: &str, code: &str, name: &str) -> Result<crate::secure::Identity
         name: name.to_string(),
         token,
         seed: hex(key.as_bytes()),
+        age: Some(enc.to_string().expose_secret().to_string()),
     })
 }
 
@@ -164,6 +181,9 @@ pub struct Phone {
     scope: String,
     /// Los incidentes del daemon (`incidents:<daemon>`).
     incidents_scope: String,
+    /// Las claves de los proveedores cifradas para este teléfono (`keys:<daemon>`) y su identidad.
+    keys_scope: String,
+    age: Option<age::x25519::Identity>,
 }
 
 pub type Shared = Arc<Mutex<Phone>>;
@@ -182,13 +202,16 @@ impl Phone {
         engine.enable_scope(&scope, None).map_err(|e| e.to_string())?;
         let incidents_scope = format!("incidents:{}", identity.daemon_id);
         engine.enable_scope(&incidents_scope, None).map_err(|e| e.to_string())?;
+        let keys_scope = format!("keys:{}", identity.daemon_id);
+        engine.enable_scope(&keys_scope, None).map_err(|e| e.to_string())?;
+        let age = identity.age.as_deref().and_then(|a| a.parse::<age::x25519::Identity>().ok());
         let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
-        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope })
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, age })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
     pub fn sync(&mut self) -> Result<Vec<Approval>, String> {
-        match self.transport.doorbell(&[self.scope.clone(), self.incidents_scope.clone()], PROTOCOL_VERSION).map_err(|e| e.to_string())? {
+        match self.transport.doorbell(&[self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone()], PROTOCOL_VERSION).map_err(|e| e.to_string())? {
             Doorbell::Versions(v) => self.engine.on_doorbell(&v, now_ms()).map_err(|e| e.to_string())?,
             Doorbell::UpgradeRequired => return Err("Condx Cloud needs a newer app".into()),
         }
@@ -279,6 +302,48 @@ impl Phone {
             .collect();
         list.sort_by_key(|i| (i.status != "open", std::cmp::Reverse(i.last_seen)));
         list
+    }
+
+    /// Para pruebas: a cuántos destinatarios está cifrada la clave de `id` y el texto cifrado, como los
+    /// confirmó el servidor.
+    pub fn confirmed_key_recipients(&self, id: &str) -> Option<usize> {
+        self.engine.confirmed_row(&self.keys_scope, id).and_then(|r| r.values.get("recipients").and_then(Value::as_u64)).map(|n| n as usize)
+    }
+
+    pub fn confirmed_key_sealed(&self, id: &str) -> Option<String> {
+        self.engine.confirmed_row(&self.keys_scope, id).and_then(|r| r.values.get("sealed").and_then(Value::as_str).map(str::to_string))
+    }
+
+    /// ¿Este teléfono puede recibir claves? (los vinculados antes de A6 no tienen identidad de cifrado).
+    pub fn can_receive_keys(&self) -> bool {
+        self.age.is_some()
+    }
+
+    /// Los proveedores cuyas claves llegaron cifradas para este teléfono, y si se abren aquí.
+    pub fn keys(&self) -> Vec<ProviderKey> {
+        let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        self.engine
+            .rows(&self.keys_scope)
+            .into_iter()
+            .map(|r| {
+                let v = &r.row.values;
+                ProviderKey { id: r.row.id.clone(), kind: s(v, "kind"), label: s(v, "label"), model: s(v, "model"), key_hint: s(v, "keyHint"), opens: self.key(&r.row.id).is_ok() }
+            })
+            .collect()
+    }
+
+    /// La clave de un proveedor, descifrada en el teléfono (para correr un agente desde aquí; nunca se
+    /// muestra entera).
+    pub fn key(&self, id: &str) -> Result<String, String> {
+        use std::io::Read;
+        let identity = self.age.as_ref().ok_or("this phone has no encryption identity: pair it again")?;
+        let row = self.engine.rows(&self.keys_scope).into_iter().find(|r| r.row.id == id).ok_or("no key for that provider")?;
+        let sealed = row.row.values.get("sealed").and_then(Value::as_str).ok_or("no key")?;
+        let reader = age::armor::ArmoredReader::new(sealed.as_bytes());
+        let decryptor = age::Decryptor::new(reader).map_err(|e| e.to_string())?;
+        let mut out = String::new();
+        decryptor.decrypt(std::iter::once(identity as &dyn age::Identity)).map_err(|_| "it isn't sealed for this phone".to_string())?.read_to_string(&mut out).map_err(|e| e.to_string())?;
+        Ok(out)
     }
 
     /// Pide algo sobre un incidente (diagnosticar, arreglar, ignorar, resolver, desplegar con un

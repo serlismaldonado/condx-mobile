@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use nsh_base::safe_area_view;
 use nsh_core::ui::prelude::*;
-use sync::{Approval, Incident, Phone};
+use sync::{Approval, Incident, Phone, ProviderKey};
 use theme::{c, card, field, kind_tag, kv, mono, muted, section, status_tag, tokens, Health, Variant};
 
 #[native_module("condx-mobile/native")]
@@ -60,6 +60,9 @@ pub fn App() -> impl IntoElement {
     let tab = signal("approvals");
     let expanded = signal(Vec::<String>::new());
     let agent_text = signal(String::new());
+    // Claves de proveedores cifradas para este teléfono (A6): cuáles llegaron y si se abren aquí.
+    let keys = signal(Vec::<ProviderKey>::new());
+    let can_keys = signal(true);
     let fingerprint = signal(String::new());
     let slot: Slot = Arc::new(Mutex::new(None));
     // Vincular: el texto del QR (o solo el código) y la URL del deployment si hace falta.
@@ -97,9 +100,13 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
-                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents()))).await {
-                            Some(Ok((list, pending, incs))) => {
+                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys()))).await {
+                            Some(Ok((list, pending, incs, ks, can))) => {
                                 incidents.set(incs);
+                                if keys.get() != ks {
+                                    keys.set(ks);
+                                }
+                                can_keys.set(can);
                                 let waiting = list.iter().filter(|a| a.status == "waiting-approval").count();
                                 waiting_count.set(waiting);
                                 if status.get().starts_with("Offline") {
@@ -541,6 +548,22 @@ pub fn App() -> impl IntoElement {
                                                 card()
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
                                                     .child(kv("Stored in", text(secure::backend()).text_size(px(13.0))))
+                                                    .child(dynamic(move || {
+                                                        let ks = keys.get();
+                                                        let content = if !can_keys.get() {
+                                                            muted("Pair this phone again to receive provider keys.").into_element()
+                                                        } else if ks.is_empty() {
+                                                            muted("No provider keys yet.").into_element()
+                                                        } else {
+                                                            let mut col = view().gap_1();
+                                                            for k in ks {
+                                                                let label = format!("{} · {} · key {}", k.label, k.model, k.key_hint);
+                                                                col = col.child(status_tag(if k.opens { Health::Ok } else { Health::Bad }, if k.opens { label } else { format!("{label} (can't open it here)") }));
+                                                            }
+                                                            col.into_element()
+                                                        };
+                                                        kv("Keys", content).into_element()
+                                                    }))
                                                     .child(view().flex_row().pt_1().child(theme::button("Unpair this phone", Variant::Outline, unpair.clone()))),
                                             ),
                                     )

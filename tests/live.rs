@@ -193,3 +193,33 @@ fn incidentes_desde_el_telefono() {
     daemon("DELETE", &format!("/api/cloud/devices/{device_id}"), None);
     assert!(phone.sync().is_err());
 }
+
+#[test]
+#[ignore = "needs a throwaway condxd linked to a throwaway Condx Cloud, with a provider whose key is sk-fake-not-real-A6"]
+fn claves_cifradas_en_el_telefono() {
+    let (mut a, device_a) = paired_phone("Keys phone A");
+    let (mut b, _device_b) = paired_phone("Keys phone B");
+    let opens = |p: &mut Phone, n: usize| {
+        for _ in 0..120 {
+            let _ = p.sync();
+            let ks = p.keys();
+            if ks.iter().any(|k| k.id == "fake") && p.confirmed_key_recipients("fake") == Some(n) {
+                return p.key("fake");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        panic!("timed out waiting for a key sealed for {n} recipients");
+    };
+    // La Mac y los dos teléfonos.
+    assert_eq!(opens(&mut a, 3).unwrap(), "sk-fake-not-real-A6");
+    assert_eq!(opens(&mut b, 3).unwrap(), "sk-fake-not-real-A6");
+    assert!(a.can_receive_keys());
+    // En lo que llega solo está cifrada.
+    let sealed = a.confirmed_key_sealed("fake").unwrap();
+    assert!(sealed.contains("BEGIN AGE ENCRYPTED FILE") && !sealed.contains("sk-fake-not-real-A6"));
+
+    // Quitar el teléfono A: el daemon vuelve a cifrar para la Mac y B; B la sigue abriendo.
+    daemon("DELETE", &format!("/api/cloud/devices/{device_a}"), None);
+    assert_eq!(opens(&mut b, 2).unwrap(), "sk-fake-not-real-A6");
+    assert!(a.sync().is_err(), "a removed phone doesn't sync anymore");
+}

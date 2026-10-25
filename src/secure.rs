@@ -19,6 +19,10 @@ pub struct Identity {
     pub token: String,
     /// Semilla de la llave Ed25519 (hex, 32 bytes).
     pub seed: String,
+    /// Identidad age (X25519) con la que el daemon le cifra las claves de los proveedores (fase A6).
+    /// Los teléfonos vinculados antes no la tienen: vuelven a vincularse para recibir claves.
+    #[serde(default)]
+    pub age: Option<String>,
 }
 
 pub fn load() -> Result<Option<Identity>, String> {
@@ -236,7 +240,7 @@ mod tests {
         unsafe { std::env::set_var("CONDX_MOBILE_IDENTITY", dir.join("id.json")) };
         clear().unwrap();
         assert_eq!(load().unwrap(), None);
-        let id = Identity { url: "http://x".into(), daemon_id: "mac-1".into(), device_id: "phone-1".into(), name: "iPhone".into(), token: "t".repeat(64), seed: "0".repeat(64) };
+        let id = Identity { url: "http://x".into(), daemon_id: "mac-1".into(), device_id: "phone-1".into(), name: "iPhone".into(), token: "t".repeat(64), seed: "0".repeat(64), age: None };
         save(&id).unwrap();
         assert_eq!(load().unwrap(), Some(id));
         clear().unwrap();
