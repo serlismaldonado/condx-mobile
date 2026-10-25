@@ -555,10 +555,11 @@ pub fn App() -> impl IntoElement {
                                                         } else if ks.is_empty() {
                                                             muted("No provider keys yet.").into_element()
                                                         } else {
-                                                            let mut col = view().gap_1();
+                                                            // Nombre en la fila del punto; el resto debajo, que sí se ajusta al ancho.
+                                                            let mut col = view().gap_2();
                                                             for k in ks {
-                                                                let label = format!("{} · {} · key {}", k.label, k.model, k.key_hint);
-                                                                col = col.child(status_tag(if k.opens { Health::Ok } else { Health::Bad }, if k.opens { label } else { format!("{label} (can't open it here)") }));
+                                                                let detail = format!("{} · key {}{}", k.model, k.key_hint, if k.opens { "" } else { " · can't open it here" });
+                                                                col = col.child(view().gap_1().child(status_tag(if k.opens { Health::Ok } else { Health::Bad }, k.label)).child(muted(detail)));
                                                             }
                                                             col.into_element()
                                                         };
