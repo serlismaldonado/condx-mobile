@@ -176,3 +176,70 @@ pub fn ago(ms: i64) -> String {
         _ => format!("{} d ago", s / 86_400),
     }
 }
+
+/// Deslizar para confirmar, como el «slide to unlock» del iPhone: la perilla amarilla sigue al
+/// dedo (en nativo, sin trabajo por cuadro) y, si llega casi al final, `on_done`; si no, vuelve.
+/// Reemplaza escribir el nombre del entorno: es igual de deliberado y no se hace por accidente.
+pub fn slide_to_confirm(label: &'static str, on_done: impl Fn() + Clone + 'static) -> impl IntoElement {
+    const KNOB: f32 = 48.0;
+    const HEIGHT: f32 = 48.0;
+    let width = signal(0.0f32);
+    view()
+        .h(px(HEIGHT))
+        .border_1()
+        .border_color(c(tokens::CARD_BORDER))
+        .bg(c(tokens::HOVER))
+        .on_layout(move |b: &Bounds<Points>| {
+            let w = f32::from(b.size.width);
+            if (w - width.get()).abs() > 0.5 {
+                width.set(w);
+            }
+        })
+        .child(dynamic(move || {
+            let on_done = on_done.clone();
+            // Hasta dónde llega la perilla (el ancho del carril menos ella y los bordes).
+            let max = (width.get() - KNOB - 2.0).max(1.0);
+            let x = animated_value(0.0);
+            let knob_x = x.interpolate(&[0.0, max], &[0.0, max]);
+            let label_fade = x.interpolate(&[0.0, max * 0.6], &[1.0, 0.0]);
+            view()
+                .flex_1()
+                .child(
+                    view()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .top(px(0.0))
+                        .bottom(px(0.0))
+                        .items_center()
+                        .justify_center()
+                        .bind_opacity(&label_fade)
+                        .child(text(label).text_size(px(13.5)).text_color(c(tokens::MUTED))),
+                )
+                .child(
+                    view()
+                        .absolute()
+                        .left(px(0.0))
+                        .top(px(0.0))
+                        .w(px(KNOB))
+                        .h(px(HEIGHT - 2.0))
+                        .items_center()
+                        .justify_center()
+                        .bg(c(tokens::ACCENT))
+                        .bind_translate_x(&knob_x)
+                        .claim_touches(TouchClaim::on_pan(PanActivation::horizontal(px(6.0), px(12.0))))
+                        .pan_values(Some(&x), None)
+                        .on_pan_end(move |e: &PanEvent| {
+                            let at = e.value_x.unwrap_or(0.0);
+                            if at >= max * 0.9 {
+                                let _ = x.spring(max, Spring::default());
+                                on_done();
+                            } else {
+                                let _ = x.spring(0.0, Spring::default());
+                            }
+                        })
+                        .child(text("→").text_size(px(18.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ON_ACCENT))),
+                )
+                .into_element()
+        }))
+}

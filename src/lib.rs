@@ -52,14 +52,14 @@ pub fn App() -> impl IntoElement {
     let status = signal(String::new());
     let sync_line = signal(String::new());
     let waiting_count = signal(0usize);
+    // Avanza en cada vuelta del ciclo: los «hace N min» se vuelven a calcular.
+    let tick = signal(0u64);
     let approvals = signal(Vec::<Approval>::new());
     let fingerprint = signal(String::new());
     let slot: Slot = Arc::new(Mutex::new(None));
     // Vincular: el texto del QR (o solo el código) y la URL del deployment si hace falta.
     let pairing_text = signal(String::new());
     let pairing_url = signal(String::new());
-    // Confirmación escrita (aprobaciones «typed»), por trabajo.
-    let confirm_text = signal(String::new());
 
     // Arranque y ciclo: identidad → (pendiente: esperar) → sincronizar cada 2 s.
     {
@@ -123,6 +123,7 @@ pub fn App() -> impl IntoElement {
                     Some(Err(e)) => status.set(format!("Offline: {}", e.chars().take(80).collect::<String>())),
                     None => {}
                 }
+                tick.set(tick.get().wrapping_add(1));
                 timer(Duration::from_secs(2)).await;
             }
         });
@@ -201,12 +202,11 @@ pub fn App() -> impl IntoElement {
             (None, _, _, "waiting-approval") => (Health::Warn, format!("Needs your approval · {}", if prod { "production: Touch ID on the Mac" } else { item.level.as_str() })),
             (None, _, _, s) => (Health::Unknown, format!("Done: {s}")),
         };
-        let summary = format!(
-            "requested by {}{} · recipe {}",
-            item.requested_by,
-            if item.created_at > 0 { format!(" {}", theme::ago(item.created_at)) } else { String::new() },
-            item.recipe
-        );
+        let (requested_by, recipe, created_at) = (item.requested_by.clone(), item.recipe.clone(), item.created_at);
+        let summary = move || {
+            tick.get();
+            format!("requested by {requested_by}{} · recipe {recipe}", if created_at > 0 { format!(" {}", theme::ago(created_at)) } else { String::new() })
+        };
         card()
             .child(
                 view()
@@ -216,28 +216,29 @@ pub fn App() -> impl IntoElement {
                     .child(view().flex_1().child(text(format!("{} · {}", item.title, item.env)).text_size(px(14.0)).text_color(c(tokens::FG))))
                     .child(kind_tag(&item.env_kind)),
             )
-            .child(muted(summary))
+            .child(text(summary).text_size(px(12.5)).text_color(c(tokens::MUTED)))
             .child(status_tag(health, state))
-            .child(if waiting && typed { Some(kv("Confirm", field("Type the environment's name", confirm_text))) } else { None })
-            .child(if waiting {
-                Some(
+            .child(match (waiting, typed && !prod) {
+                // «typed»: en la Mac se escribe el nombre del entorno; aquí se desliza hasta el final
+                // (igual de deliberado) y la decisión lleva el nombre que el daemon compara.
+                (true, true) => Some(
+                    view()
+                        .gap_2()
+                        .pt_1()
+                        .child(theme::slide_to_confirm("Slide to approve", move || d1(job_a.clone(), true, Some(env.clone()))))
+                        .child(view().flex_row().child(theme::button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None))))
+                        .into_element(),
+                ),
+                (true, false) => Some(
                     view()
                         .flex_row()
                         .gap_2()
                         .pt_1()
-                        .child(theme::button(if prod { "Propose" } else { "Approve" }, Variant::Primary, move || {
-                            let confirm = typed.then(|| confirm_text.get().trim().to_string());
-                            if typed && confirm.as_deref() != Some(env.as_str()) {
-                                status.set(format!("Type “{env}” to approve"));
-                                return;
-                            }
-                            confirm_text.set(String::new());
-                            d1(job_a.clone(), true, confirm);
-                        }))
-                        .child(theme::button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None))),
-                )
-            } else {
-                None
+                        .child(theme::button(if prod { "Propose" } else { "Approve" }, Variant::Primary, move || d1(job_a.clone(), true, None)))
+                        .child(theme::button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None)))
+                        .into_element(),
+                ),
+                (false, _) => None,
             })
     };
 
