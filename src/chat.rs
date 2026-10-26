@@ -45,6 +45,45 @@ pub fn state_of(t: &Thread) -> (Health, &'static str) {
     }
 }
 
+/// Los agentes de un hilo, uno detrás de otro (hasta tres): con más de uno se apilan con un borde del
+/// color del fondo; con uno, su avatar solo; sin ninguno, la inicial del título.
+/// Los de un hilo en una fila, para la lista: hasta dos caras chicas un poco encimadas y «+N».
+fn faces_inline(t: &Thread, size: f32) -> AnyElement {
+    let people: Vec<(String, String)> = t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect();
+    if people.is_empty() {
+        return avatar(&t.title, size).into_element();
+    }
+    let mut row = view().flex_row().items_center().flex_shrink_0();
+    for (ix, (name, logo)) in people.iter().take(2).enumerate() {
+        let ring = view().w(px(size + 2.0)).h(px(size + 2.0)).rounded(px(size / 2.0 + 1.0)).items_center().justify_center().bg(c(tokens::CARD)).child(face(name, logo, size));
+        row = row.child(if ix == 0 { ring } else { ring.ml(px(-size * 0.35)) });
+    }
+    if people.len() > 2 {
+        row = row.child(text(format!("+{}", people.len() - 2)).text_size(px(11.0)).text_color(c(tokens::SUBTLE)).ml(px(3.0)));
+    }
+    row.into_element()
+}
+
+/// El estado de un hilo, discreto (igual en la lista y en el encabezado): un punto y la palabra solo
+/// cuando pide algo (ámbar), trabaja o algo salió mal (rojo); «Replied»/«Done» no se dicen (es lo
+/// normal). Después, dónde trabaja.
+fn status_line(health: Health, state: &str, t: &Thread) -> View {
+    let quiet = matches!(state, "Replied" | "Done" | "New");
+    let mut row = view().flex_row().gap(px(6.0)).items_center();
+    if !quiet {
+        let color = match health {
+            Health::Bad => tokens::DANGER,
+            Health::Warn => tokens::WARNING,
+            _ => tokens::MUTED,
+        };
+        row = row.child(theme::dot(health)).child(text(state.to_string()).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(color)));
+        if t.project.is_some() || t.env.is_some() {
+            row = row.child(text("·").text_size(px(11.5)).text_color(c(tokens::SUBTLE)));
+        }
+    }
+    row.child(view().flex_1().child(where_tag(t)))
+}
+
 /// En qué proyecto y entorno trabaja el hilo: «heskala-erp · dev» (producción en rojo).
 fn where_tag(t: &Thread) -> AnyElement {
     let label = match (&t.project, &t.env) {
@@ -126,7 +165,7 @@ pub enum Presence {
 }
 
 /// El ícono chico de quién contesta, en la esquina del cuadro de escribir (sin palabras).
-fn presence_icon(p: Presence) -> AnyElement {
+pub fn presence_icon(p: Presence) -> AnyElement {
     let (icon, color) = match p {
         Presence::Mac => (theme::LAPTOP, tokens::SUCCESS),
         Presence::Cloud => (theme::CLOUD, tokens::INFO),
@@ -320,75 +359,6 @@ fn face(name: &str, logo: &str, size: f32) -> AnyElement {
     crate::logos::avatar(logo, size).unwrap_or_else(|| avatar(name, size).into_element())
 }
 
-/// Los agentes de un hilo, uno detrás de otro (hasta tres): con más de uno se apilan con un borde del
-/// color del fondo; con uno, su avatar solo; sin ninguno, la inicial del título.
-/// Los de un hilo en una fila, para la lista: hasta dos caras chicas un poco encimadas y «+N».
-fn faces_inline(t: &Thread, size: f32) -> AnyElement {
-    let people: Vec<(String, String)> = t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect();
-    if people.is_empty() {
-        return avatar(&t.title, size).into_element();
-    }
-    let mut row = view().flex_row().items_center().flex_shrink_0();
-    for (ix, (name, logo)) in people.iter().take(2).enumerate() {
-        let ring = view().w(px(size + 2.0)).h(px(size + 2.0)).rounded(px(size / 2.0 + 1.0)).items_center().justify_center().bg(c(tokens::CARD)).child(face(name, logo, size));
-        row = row.child(if ix == 0 { ring } else { ring.ml(px(-size * 0.35)) });
-    }
-    if people.len() > 2 {
-        row = row.child(text(format!("+{}", people.len() - 2)).text_size(px(11.0)).text_color(c(tokens::SUBTLE)).ml(px(3.0)));
-    }
-    row.into_element()
-}
-
-fn faces(t: &Thread, size: f32) -> AnyElement {
-    let people: Vec<(String, String)> = t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect();
-    // El mismo cuadro que un avatar solo: con más de un agente, dos más chicos en diagonal (el
-    // segundo encima) y, si hay más, «+N» en una insignia.
-    let col = view().w(px(size)).h(px(size)).flex_shrink_0();
-    // Todos del mismo tamaño: el solo, como los de un par (centrado en el cuadro).
-    let small = size * 0.76;
-    match people.len() {
-        0 => col.items_center().justify_center().child(avatar(&t.title, small)).into_element(),
-        1 => col.items_center().justify_center().child(face(&people[0].0, &people[0].1, small)).into_element(),
-        n => {
-            let ring = |x: f32, y: f32, z: i32, name: &str, logo: &str| {
-                view()
-                    .absolute()
-                    .left(px(x))
-                    .top(px(y))
-                    .w(px(small + 3.0))
-                    .h(px(small + 3.0))
-                    .rounded(px(small / 2.0 + 1.5))
-                    .items_center()
-                    .justify_center()
-                    .bg(c(tokens::CARD))
-                    .z_index(z)
-                    .child(face(name, logo, small))
-            };
-            let far = size - small - 3.0;
-            let mut stack = col.child(ring(0.0, 0.0, 1, &people[0].0, &people[0].1)).child(ring(far, far, 2, &people[1].0, &people[1].1));
-            if n > 2 {
-                stack = stack.child(
-                    view()
-                        .absolute()
-                        .right(px(-4.0))
-                        .bottom(px(-4.0))
-                        .z_index(3)
-                        .px(px(4.0))
-                        .min_w(px(17.0))
-                        .h(px(17.0))
-                        .rounded(px(8.5))
-                        .items_center()
-                        .justify_center()
-                        .bg(c(tokens::FG))
-                        .border_2()
-                        .border_color(c(tokens::CARD))
-                        .child(text(format!("+{}", n - 2)).text_size(px(9.5)).font_weight(FontWeight::SEMIBOLD).text_color(c(tokens::CARD))),
-                );
-            }
-            stack.into_element()
-        }
-    }
-}
 
 fn avatar(name: &str, size: f32) -> impl IntoElement {
     let initial = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "·".into());
@@ -726,12 +696,21 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
         let (health, state) = state_of(&t);
         let queued = t.items.iter().filter(|i| i["status"] == "queued").count();
         let activity = activity_of(&t);
-        // Sin columna para el avatar: chico, al lado del título; abajo el estado y dónde trabaja, y lo
-        // último (o lo que hace ahora el agente, con el brillo).
+        // Arriba el título a todo el ancho con la hora; abajo lo último (o lo que hace ahora el agente,
+        // con el brillo) y el estado, con los agentes en la esquina de abajo a la derecha.
+        let last_line = match (activity, queued) {
+            (Some(doing), _) => dynamic(move || {
+                global::<live::Tick>().get();
+                live::shimmer(&doing, 13.0).into_element()
+            })
+            .into_element(),
+            (None, n) if n > 0 => text(if n == 1 { "1 message waits for a free agent".to_string() } else { format!("{n} messages wait for a free agent") }).text_size(px(13.0)).text_color(c(tokens::MUTED)).into_element(),
+            _ => text(preview).number_of_lines(2u32).text_size(px(13.0)).line_height(px(18.0)).text_color(c(tokens::MUTED)).into_element(),
+        };
         let mut row = view()
-            .gap(px(5.0))
+            .gap(px(4.0))
             .px_3()
-            .py(px(11.0))
+            .py(px(12.0))
             .bg(c(tokens::CARD))
             .active(|s| s.bg(c(tokens::ACTIVE)))
             .on_press(move || {
@@ -744,20 +723,17 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
                     .flex_row()
                     .gap_2()
                     .items_center()
-                    .child(faces_inline(&t, 18.0))
                     .child(view().flex_1().child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
                     .child(text(short_ago(t.updated_at)).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
             )
-            .child(view().flex_row().gap_2().items_center().child(theme::pill(health, state)).child(view().flex_1().child(where_tag(&t))))
-            .child(match (activity, queued) {
-                (Some(doing), _) => dynamic(move || {
-                    global::<live::Tick>().get();
-                    live::shimmer(&doing, 13.0).into_element()
-                })
-                .into_element(),
-                (None, n) if n > 0 => text(if n == 1 { "1 message waits for a free agent".to_string() } else { format!("{n} messages wait for a free agent") }).text_size(px(13.0)).text_color(c(tokens::MUTED)).into_element(),
-                _ => text(preview).number_of_lines(2u32).text_size(px(13.0)).line_height(px(18.0)).text_color(c(tokens::MUTED)).into_element(),
-            });
+            .child(
+                view()
+                    .flex_row()
+                    .gap_3()
+                    .items_end()
+                    .child(view().flex_1().gap(px(6.0)).child(last_line).child(status_line(health, state, &t)))
+                    .child(view().pb(px(1.0)).child(faces_inline(&t, 18.0))),
+            );
         if ix + 1 < n {
             row = row.border_b_1().border_color(c(tokens::CARD_BORDER));
         }
@@ -986,7 +962,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                     } else {
                                         {
                                             let (health, state) = state_of(&t);
-                                            view().flex_row().gap_2().items_center().child(theme::dot(health)).child(text(state).text_size(px(11.5)).text_color(c(tokens::MUTED))).child(view().flex_1().child(where_tag(&t))).into_element()
+                                            status_line(health, state, &t).into_element()
                                         }
                                     }),
                             )

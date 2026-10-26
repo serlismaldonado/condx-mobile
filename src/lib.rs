@@ -58,6 +58,11 @@ const MAC_OFFLINE_MS: i64 = 3 * 60_000;
 
 #[component]
 pub fn App() -> impl IntoElement {
+    // El tema elegido en Ajustes (sistema, claro u oscuro).
+    let scheme = signal(theme::saved_scheme());
+    theme::apply_scheme(&scheme.get(), false);
+    // En qué idioma contestan los agentes (lo configura la Mac).
+    let agent_lang = signal(String::new());
     let screen = signal(Screen::Loading);
     // El dueño de la app: las tareas que arranca un botón corren bajo él (las del botón se cancelan
     // cuando ese pedazo de la interfaz se vuelve a dibujar, p. ej. al empezar a grabar).
@@ -251,6 +256,10 @@ pub fn App() -> impl IntoElement {
                                 if let Some(cat) = with_phone(&slot, |p| p.catalog()).await
                                     && catalog.get() != cat {
                                         catalog.set(cat);
+                                    }
+                                if let Some(lang) = with_phone(&slot, |p| p.agent_language()).await
+                                    && agent_lang.get() != lang {
+                                        agent_lang.set(lang);
                                     }
                                 if let Some(a) = with_phone(&slot, |p| p.latest_apk()).await
                                     && apk.get() != a {
@@ -644,7 +653,13 @@ pub fn App() -> impl IntoElement {
 
     // Como en la app de escritorio, solo lo que espera; y lo que decidió este teléfono, para ver
     // qué hizo la Mac con eso.
-    let visible = move || approvals.get().into_iter().filter(|a| a.status == "waiting-approval" || a.decision.is_some()).collect::<Vec<_>>();
+    // Lo que espera primero; lo decidido aquí solo del último día (si no, el historial tapa lo que importa).
+    let visible = move || {
+        let day = sync::now_ms() - 24 * 3600 * 1000;
+        let mut list: Vec<Approval> = approvals.get().into_iter().filter(|a| a.status == "waiting-approval" || (a.decision.is_some() && a.created_at > day)).collect();
+        list.sort_by_key(|a| (a.status != "waiting-approval", std::cmp::Reverse(a.created_at)));
+        list
+    };
 
     let row = move |a: ReadSignal<Approval>, _ix: ReadSignal<usize>| {
         let (d1, d2) = (decide.clone(), decide.clone());
@@ -658,9 +673,10 @@ pub fn App() -> impl IntoElement {
         let (health, state) = match (&item.decision, item.pending, item.phone_result.as_deref(), item.status.as_str()) {
             (Some(_), true, _, _) => (Health::Unknown, "Sending your decision…".to_string()),
             (Some(_), false, Some("approved"), _) => (Health::Ok, "Approved from this phone".to_string()),
-            (Some(_), false, Some("rejected the job"), _) => (Health::Bad, "Rejected from this phone".to_string()),
+            (Some(_), false, Some("rejected the job"), _) => (Health::Unknown, "Rejected from this phone".to_string()),
             (Some(_), false, Some("needs-mac"), _) => (Health::Warn, "Waiting for Touch ID on the Mac".to_string()),
-            (Some(_), false, Some(r), _) => (Health::Bad, format!("The Mac didn't apply it: {}", r.trim_start_matches("rejected: "))),
+            // Llegó tarde o la Mac la rechazó: un resultado, no una alarma.
+            (Some(_), false, Some(r), _) => (Health::Unknown, format!("Not applied: {}", r.trim_start_matches("rejected: "))),
             (Some(d), false, None, _) => (Health::Unknown, format!("You chose {d} · the Mac checks it")),
             (None, _, _, "waiting-approval") => (Health::Warn, if prod { "Production: Touch ID on the Mac".to_string() } else { format!("Needs your approval · {}", item.level) }),
             (None, _, _, s) => (Health::Unknown, format!("Done: {s}")),
@@ -996,20 +1012,41 @@ pub fn App() -> impl IntoElement {
                     view().into_element()
                 }
             }))
+            // Quién contesta (laptop verde: la Mac; nube azul: el sitio en la nube; nube roja: sin
+            // conexión), como en el cuadro de escribir, y los ajustes.
+            .child(dynamic(move || if screen.get() == Screen::Ready { chat::presence_icon(presence.get()) } else { view().into_element() }))
             .child(dynamic(move || {
-                let line = sync_line.get();
-                let health = match line.as_str() {
-                    "in sync" => Health::Ok,
-                    "offline" => Health::Bad,
-                    l if l.starts_with("Mac offline") => Health::Bad,
-                    "" => Health::Unknown,
-                    _ => Health::Warn,
-                };
-                if screen.get() == Screen::Ready { status_tag(health, line).into_element() } else { view().into_element() }
+                if screen.get() != Screen::Ready {
+                    return view().into_element();
+                }
+                view()
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(16.0))
+                    .active(|s| s.bg(c(tokens::ACTIVE)))
+                    .on_press(move || {
+                        thread_open.set(None);
+                        tab.set(if tab.get() == "settings" { "threads" } else { "settings" });
+                    })
+                    .child(theme::icon(theme::SLIDERS, if tab.get() == "settings" { tokens::FG } else { tokens::MUTED }, 18.0))
+                    .into_element()
             }))
     };
 
-    view()
+    // La barra de estado sigue al tema elegido (íconos oscuros en el claro), no al del sistema.
+    let bar = move || nsh_core::StatusBarSetting {
+        style: Some(match scheme.get().as_str() {
+            "light" => nsh_core::StatusBarStyle::Dark,
+            "dark" => nsh_core::StatusBarStyle::Light,
+            _ => nsh_core::StatusBarStyle::Default,
+        }),
+        ..Default::default()
+    };
+    #[allow(deprecated)]
+    let shell = nsh_core::ui::stack();
+    shell.flex_1().child(nsh_core::ui::screen().flex_1().header_visible(false).status_bar(bar).child(view()
         .flex_1()
         .bg(c(tokens::GROUND))
         .text_color(c(tokens::FG))
@@ -1074,6 +1111,17 @@ pub fn App() -> impl IntoElement {
                                                 let open = incidents.get().iter().filter(|i| i.status == "open").count();
                                                 let busy = threads.get().iter().filter(|t| t.waiting_answer || t.status == "waiting-approval").count();
                                                 let t = tab.get();
+                                                if t == "settings" {
+                                                    return view()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .h(px(34.0))
+                                                        .on_press(move || tab.set("threads"))
+                                                        .child(text("‹").text_size(px(24.0)).text_color(c(tokens::FG)))
+                                                        .child(text("Settings").text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                                                        .into_element();
+                                                }
                                                 theme::segmented(vec![
                                                     ("Threads", busy, t == "threads", Box::new(move || tab.set("threads"))),
                                                     ("Approvals", waiting_count.get(), t == "approvals", Box::new(move || tab.set("approvals"))),
@@ -1127,7 +1175,15 @@ pub fn App() -> impl IntoElement {
                                                     if thread_open.get().is_some() {
                                                         view().hidden().into_element()
                                                     } else {
-                                                        view().gap_3().child(update_banner(apk.get())).child(chat::list(threads.get(), thread_open, thread_text, loaded.get(), shown.get())).into_element()
+                                                        {
+                                                        // El aviso de versión nueva solo si hay (vacío sumaba otro espacio).
+                                                        let latest = apk.get().filter(|(_, code, _)| *code > version_code(VERSION));
+                                                        let mut v = view().gap_3();
+                                                        if latest.is_some() {
+                                                            v = v.child(update_banner(latest));
+                                                        }
+                                                        v.child(chat::list(threads.get(), thread_open, thread_text, loaded.get(), shown.get())).into_element()
+                                                    }
                                                     }
                                                 }
                                             }))
@@ -1135,10 +1191,33 @@ pub fn App() -> impl IntoElement {
                                             .child(dynamic({
                                                 let unpair = unpair.clone();
                                                 move || {
-                                                if tab.get() == "threads" {
+                                                if tab.get() != "settings" {
                                                     return view().hidden().into_element();
                                                 }
-                                                view().gap_3().pt_2().child(section("This phone")).child(
+                                                let scheme_now = scheme.get();
+                                                let pick = move |v: &'static str| -> Box<dyn Fn()> {
+                                                    Box::new(move || {
+                                                        scheme.set(v.to_string());
+                                                        theme::apply_scheme(v, true);
+                                                    })
+                                                };
+                                                let lang = match agent_lang.get().as_str() {
+                                                    "" => "Same as each message".to_string(),
+                                                    "es" => "Español".to_string(),
+                                                    "en" => "English".to_string(),
+                                                    other => other.to_string(),
+                                                };
+                                                view()
+                                                    .gap_3()
+                                                    .child(section("Appearance"))
+                                                    .child(theme::segmented(vec![
+                                                        ("System", 0, scheme_now == "system", pick("system")),
+                                                        ("Light", 0, scheme_now == "light", pick("light")),
+                                                        ("Dark", 0, scheme_now == "dark", pick("dark")),
+                                                    ]))
+                                                    .child(section("Agents"))
+                                                    .child(card().rounded(px(10.0)).child(kv("Answer in", text(lang).text_size(px(13.0)))).child(muted("Set it on the Mac: Condx → Settings → Agents → Limits.")))
+                                                    .child(section("This phone")).child(
                                                 card().rounded(px(10.0))
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
                                                     .child(kv("Stored in", text(secure::backend()).text_size(px(13.0))))
@@ -1214,7 +1293,7 @@ pub fn App() -> impl IntoElement {
                             })),
                     ),
             ),
-        )
+        )))
 }
 
 /// Esta app: su versión y su número (como el versionCode de la APK: MA·10000 + MI·100 + PA).

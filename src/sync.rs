@@ -517,6 +517,17 @@ impl Phone {
         Some((v.get("version")?.as_str()?.to_string(), v.get("versionCode")?.as_i64()?, v.get("url")?.as_str()?.to_string()))
     }
 
+    /// En qué idioma contestan los agentes (la configuración que publica la Mac en `_settings`).
+    pub fn agent_language(&self) -> String {
+        self.engine
+            .rows(&self.threads_scope)
+            .into_iter()
+            .find(|r| r.row.id == "_settings")
+            .and_then(|r| r.row.values.get("settings").and_then(Value::as_str).and_then(|t| serde_json::from_str::<Value>(t).ok()))
+            .and_then(|v| v["language"].as_str().map(str::to_string))
+            .unwrap_or_default()
+    }
+
     /// El último latido de la Mac (`aliveAt` en la fila `_mac`, cada 5 min mientras está encendida).
     pub fn mac_alive_at(&self) -> Option<i64> {
         self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("aliveAt")?.as_i64()

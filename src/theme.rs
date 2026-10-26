@@ -116,13 +116,9 @@ pub fn kind_tag(kind: &str) -> impl IntoElement {
         other => other,
     }
     .to_string();
-    view()
-        .px(px(6.0))
-        .h(px(18.0))
-        .justify_center()
-        .border_1()
-        .border_color(if prod { c(tokens::PROD) } else { c(tokens::CARD_BORDER) })
-        .child(text(label).text_size(px(11.0)).text_color(if prod { c(tokens::PROD) } else { c(tokens::MUTED) }))
+    // Producción con su marco rojo; los demás, solo el texto (sin borde: no compite con el estado).
+    let tag = view().h(px(18.0)).justify_center().child(text(label).text_size(px(11.0)).text_color(if prod { c(tokens::PROD) } else { c(tokens::SUBTLE) }));
+    if prod { tag.px(px(6.0)).border_1().border_color(c(tokens::PROD)) } else { tag }
 }
 
 /// Bloque con borde sutil y recto.
@@ -344,6 +340,7 @@ pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 
 /// Agregar (un hilo nuevo).
 pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
 /// Una laptop (la Mac contesta) y una nube (contesta el sitio en la nube). Trazos de Lucide (ISC).
+pub const SLIDERS: &[&str] = &["M20 7h-9", "M14 17H5", "M17 14a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M7 4a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z"];
 pub const LAPTOP: &[&str] = &["M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9", "M2 20h20", "M4 16h16l1.5 4h-19Z"];
 pub const CLOUD: &[&str] = &["M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"];
 /// Escribir un mensaje nuevo (lápiz sobre un cuadrado).
@@ -352,3 +349,26 @@ pub const COMPOSE: &[&str] = &["M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 
 pub fn mic_icon(color: (u32, u32), size: f32) -> CanvasView {
     icon(MIC, color, size)
 }
+
+/// El tema elegido en Ajustes (`system`, `light`, `dark`), guardado en el teléfono.
+pub fn saved_scheme() -> String {
+    crate::secure::data_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("prefs.json")).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["theme"].as_str().map(str::to_string))
+        .unwrap_or_else(|| "system".into())
+}
+
+/// Aplica el tema (sistema, claro u oscuro) y lo guarda.
+pub fn apply_scheme(scheme: &str, save: bool) {
+    let appearance = match scheme {
+        "light" => nsh_core::ui::Appearance::Light,
+        "dark" => nsh_core::ui::Appearance::Dark,
+        _ => nsh_core::ui::Appearance::System,
+    };
+    nsh_core::ui::ambient::set_color_scheme(appearance);
+    if save && let Some(d) = crate::secure::data_dir() {
+        let _ = std::fs::write(d.join("prefs.json"), serde_json::json!({ "theme": scheme }).to_string());
+    }
+}
+
