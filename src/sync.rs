@@ -563,7 +563,7 @@ impl Phone {
             sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
             delivered = own && !r.pending && !answered;
         }
-        Thread { id: "_new".into(), title: crate::i18n::t("New thread"), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false }
+        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false }
     }
 
     /// El catálogo de agentes que publica el daemon (fila `_agents`): (id, nombre, marca del proveedor).

@@ -172,6 +172,7 @@ const ES: &[(&str, &str)] = &[
     ("Merging deploys production (the repo's build or Vercel).", "Fusionar despliega producción (el build del repo o Vercel)."),
     ("Sync", "Sincronización"),
     ("Discard rejected", "Descartar rechazados"),
+    ("Last send", "Último envío"),
     // Avisos.
     ("Install", "Instalar"),
 ];

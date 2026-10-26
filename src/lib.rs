@@ -49,9 +49,30 @@ type Slot = Arc<Mutex<Option<Phone>>>;
 
 const DEVICE_NAME: &str = if cfg!(target_os = "ios") { "iPhone" } else if cfg!(target_os = "android") { "Android phone" } else { "Desktop test" };
 
+/// El último pánico dentro de un acceso al teléfono (se ve en Ajustes): antes envenenaba el candado y
+/// desde ahí nada salía (ni los mensajes) sin ningún error a la vista.
+pub static LAST_PANIC: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
 async fn with_phone<R: Send + 'static>(slot: &Slot, f: impl FnOnce(&mut Phone) -> R + Send + 'static) -> Option<R> {
     let slot = slot.clone();
-    blocking(move || slot.lock().ok()?.as_mut().map(f)).await.ok().flatten()
+    blocking(move || {
+        // Un pánico anterior no deja el teléfono inservible: se sigue con el estado que quedó.
+        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let phone = guard.as_mut()?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(phone))) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "panic".into());
+                if let Ok(mut last) = LAST_PANIC.lock() {
+                    *last = msg.chars().take(200).collect();
+                }
+                None
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Sin latido de la Mac en este rato, se la da por apagada (late cada minuto; al irse en orden avisa
@@ -74,6 +95,8 @@ pub fn App() -> impl IntoElement {
     let sync_line = signal(String::new());
     // Lo que no salió: cambios esperando y los que la nube rechazó (Ajustes → Este teléfono).
     let outbox = signal((0usize, Vec::<String>::new(), String::new()));
+    // Qué pasó con el último mensaje que se mandó desde un hilo (para ver por qué no sale).
+    let last_send = signal(String::new());
     let presence = signal(chat::Presence::Mac);
     let waiting_count = signal(0usize);
     // Avanza en cada vuelta del ciclo: los «hace N min» se vuelven a calcular.
@@ -577,15 +600,23 @@ pub fn App() -> impl IntoElement {
             if !thread_files.get().is_empty() {
                 thread_files.set(vec![]);
             }
-            app_owner.run(|| spawn(async move {
-                if let Some(Err(e)) = with_phone(&slot, move |p| p.thread_send_with(&id, &text, &files)).await {
-                    status.set(crate::i18n::tr(format!("Couldn't send: {e}"), format!("No se pudo enviar: {e}")));
+            last_send.set(format!("{} · {} chars → {id}", theme::short(sync::now_ms()), text.chars().count()));
+            let sent = app_owner.run(|| spawn(async move {
+                let tid = id.clone();
+                match with_phone(&slot, move |p| p.thread_send_with(&id, &text, &files)).await {
+                    Some(Ok(())) => last_send.set(format!("ok → {tid}")),
+                    Some(Err(e)) => {
+                        last_send.set(format!("error → {tid}: {e}"));
+                        status.set(crate::i18n::tr(format!("Couldn't send: {e}"), format!("No se pudo enviar: {e}")));
+                    }
+                    None => last_send.set(format!("no phone → {tid}")),
                 }
                 kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.threads()).await {
                     threads.set(list);
                 }
             }));
+            let _ = sent;
         }
     };
 
@@ -1362,7 +1393,10 @@ pub fn App() -> impl IntoElement {
                                                         let slot = slot_settings.clone();
                                                         move || {
                                                             let (pending, rejected, debug) = outbox.get();
-                                                            let mut col = view().gap(px(4.0)).child(kv("Sync", text(crate::i18n::tr(format!("{pending} waiting to send · {} rejected", rejected.len()), format!("{pending} por enviar · {} rechazados", rejected.len()))).text_size(px(13.0))));
+                                                            let mut col = view().gap(px(4.0)).child(kv("Last send", text(last_send.get()).number_of_lines(2u32).text_size(px(12.0)))).child({
+                                                                let p = LAST_PANIC.lock().map(|l| l.clone()).unwrap_or_default();
+                                                                if p.is_empty() { view().into_element() } else { text(format!("panic: {p}")).number_of_lines(3u32).text_size(px(11.5)).text_color(c(tokens::DANGER)).into_element() }
+                                                            }).child(kv("Sync", text(crate::i18n::tr(format!("{pending} waiting to send · {} rejected", rejected.len()), format!("{pending} por enviar · {} rechazados", rejected.len()))).text_size(px(13.0))));
                                                             for r in rejected.iter().take(4) {
                                                                 col = col.child(text(r.clone()).number_of_lines(2u32).text_size(px(11.5)).text_color(c(tokens::DANGER)));
                                                             }
