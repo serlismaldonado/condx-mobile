@@ -17,6 +17,20 @@ CONDX_DAEMON_URL=http://127.0.0.1:4799 CONDX_APP_TOKEN=… cargo test --test liv
 
 The live tests need a throwaway `condxd` linked to a throwaway Condx Cloud, never a real one.
 
+## Building the Android APK
+
+`scripts/android-apk.sh` builds an installable APK by hand: arm64 only (half the size), 16 KB pages
+(Android 15+ warns if the library is not aligned) and signed with the debug keystore. `nsh` 0.2 cannot
+pick ABIs or linker flags: they are passed through `RUSTFLAGS` and x86_64 is removed from the APK afterwards.
+
+```sh
+scripts/android-apk.sh            # → .nsh/out/condx-mobile-arm64.apk
+```
+
+It needs `nsh`, the Android SDK with the NDK and build-tools, and the debug keystore
+(`~/.android/debug.keystore`); `ANDROID_HOME`, `ANDROID_NDK_HOME` and `JAVA_HOME` are taken from the
+environment, with macOS defaults. Install the APK on the phone with `adb install`.
+
 ## Native Shell template notes
 
 An app written in Rust: its UI is `src/lib.rs`, and `nsh.json` names the root component (`"root": "App"`).
