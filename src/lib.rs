@@ -185,6 +185,9 @@ pub fn App() -> impl IntoElement {
         spawn(async move {
             // Cuándo se preguntó si el teléfono sigue vinculado.
             let mut checked: Option<std::time::Instant> = None;
+            // Fallas seguidas de la red: una sola (al volver de otra app la red tarda un momento) no
+            // marca «Offline».
+            let mut failures = 0u32;
             loop {
                 let id = blocking(secure::load).await.ok().and_then(|r| r.ok()).flatten();
                 let Some(id) = id else {
@@ -251,6 +254,7 @@ pub fn App() -> impl IntoElement {
                         screen.set(Screen::Ready);
                         match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads(), p.mac_alive_at()))).await {
                             Some(Ok((list, pending, incs, ks, can, ths, alive))) => {
+                                failures = 0;
                                 // El hilo pedido desde un incidente: abrirlo cuando el daemon contesta.
                                 if let Some(pid) = pending_thread.get()
                                     && let Some(i) = incs.iter().find(|i| i.id == pid && !i.waiting) {
@@ -344,9 +348,12 @@ pub fn App() -> impl IntoElement {
                                 }
                             }
                             Some(Err(e)) => {
-                                presence.set(chat::Presence::Offline);
-                                sync_line.set("offline".into());
-                                status.set(format!("Offline: {}", e.chars().take(80).collect::<String>()));
+                                failures += 1;
+                                if failures >= 2 {
+                                    presence.set(chat::Presence::Offline);
+                                    sync_line.set("offline".into());
+                                    status.set(format!("Offline: {}", e.chars().take(80).collect::<String>()));
+                                }
                             }
                             None => {}
                         }
