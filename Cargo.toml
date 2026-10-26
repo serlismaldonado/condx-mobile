@@ -28,6 +28,7 @@ log = "0.4"
 convex = { version = "0.10.4", default-features = false, features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 futures-util = "0.3"
+tracing = { version = "0.1", features = ["log"] }
 
 # Dónde vive la identidad del teléfono: Keychain en iOS, Keystore en Android (en el escritorio, un archivo de prueba).
 [target.'cfg(target_os = "ios")'.dependencies]

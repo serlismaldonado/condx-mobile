@@ -29,7 +29,11 @@ impl Bell {
         let _ = std::thread::Builder::new().name("bell".into()).spawn(move || {
             let Ok(rt) = tokio::runtime::Builder::new_current_thread().enable_all().build() else { return };
             while !me.stop.load(Ordering::Relaxed) {
-                let _ = rt.block_on(listen(&me, &url, &token, &scopes, protocol));
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rt.block_on(listen(&me, &url, &token, &scopes, protocol)))) {
+                    Ok(Err(e)) => log::warn!("bell: {e}"),
+                    Err(p) => log::warn!("bell panicked: {:?}", p.downcast_ref::<String>().cloned().or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))),
+                    Ok(Ok(())) => {}
+                }
                 me.live.store(false, Ordering::Relaxed);
                 // Otro intento en un rato (sin red, el teléfono sigue con el timbre por HTTP).
                 for _ in 0..10 {
