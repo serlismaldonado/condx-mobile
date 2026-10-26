@@ -113,6 +113,26 @@ pub struct Composer {
     pub stop: Rc<dyn Fn(bool)>,
     /// Vuelve a la lista (cierra el teclado antes).
     pub close: Rc<dyn Fn()>,
+    /// Quién contesta: la Mac, el sitio en la nube (la Mac no está) o nadie (sin conexión).
+    pub presence: Signal<Presence>,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+pub enum Presence {
+    #[default]
+    Mac,
+    Cloud,
+    Offline,
+}
+
+/// El ícono chico de quién contesta, en la esquina del cuadro de escribir (sin palabras).
+fn presence_icon(p: Presence) -> AnyElement {
+    let (icon, color) = match p {
+        Presence::Mac => (theme::LAPTOP, tokens::SUCCESS),
+        Presence::Cloud => (theme::CLOUD, tokens::INFO),
+        Presence::Offline => (theme::CLOUD, tokens::DANGER),
+    };
+    theme::icon(icon, color, 14.0).into_element()
 }
 
 fn file_icon(kind: &str) -> &'static str {
@@ -927,7 +947,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .child(if t.id == "_new" { view().w(px(4.0)).into_element() } else { faces(&t, 32.0) })
+                            .child(if t.id == "_new" { view().w(px(4.0)).into_element() } else { faces(&t, 24.0) })
                             .child(
                                 view()
                                     .flex_1()
@@ -1078,7 +1098,21 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                 .child(dynamic(move || {
                     remount.get();
                     let (stop_send, stop_drop) = (composer.stop.clone(), composer.stop.clone());
-                    let card = view().mx_3().mt_2().px(px(10.0)).pt(px(8.0)).pb(px(8.0)).gap(px(6.0)).rounded(px(22.0)).border_1().border_color(c(tokens::CARD_BORDER)).bg(c(tokens::RAISED));
+                    let presence = composer.presence;
+                    let card = view()
+                        .mx_3()
+                        .mt_2()
+                        .px(px(10.0))
+                        .pt(px(8.0))
+                        .pb(px(8.0))
+                        .gap(px(6.0))
+                        .rounded(px(22.0))
+                        .border_1()
+                        .border_color(c(tokens::CARD_BORDER))
+                        .bg(c(tokens::RAISED))
+                        // Quién contesta, en la esquina: laptop verde (la Mac), nube azul (el sitio en la
+                        // nube) o nube roja (sin conexión).
+                        .child(view().absolute().top(px(10.0)).right(px(14.0)).child(dynamic(move || presence_icon(presence.get()))));
                     let round = |size: f32| view().w(px(size)).h(px(size)).rounded(px(size / 2.0)).items_center().justify_center();
                     if let Some(secs) = composer.recording.get() {
                         return card

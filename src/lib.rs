@@ -65,6 +65,7 @@ pub fn App() -> impl IntoElement {
     // Mensajes para la persona (errores, avisos) y el estado de la sincronización (barra superior).
     let status = signal(String::new());
     let sync_line = signal(String::new());
+    let presence = signal(chat::Presence::Mac);
     let waiting_count = signal(0usize);
     // Avanza en cada vuelta del ciclo: los «hace N min» se vuelven a calcular.
     let tick = signal(0u64);
@@ -251,6 +252,10 @@ pub fn App() -> impl IntoElement {
                                 // Sin latido de la Mac en 3 min (late cada minuto) o despedida: está apagada
                                 // o sin red; contesta el sitio en la nube, si hay.
                                 let mac_off = alive.filter(|at| sync::now_ms() - at > MAC_OFFLINE_MS);
+                                let p = if mac_off.is_some() { chat::Presence::Cloud } else { chat::Presence::Mac };
+                                if presence.get() != p {
+                                    presence.set(p);
+                                }
                                 sync_line.set(match (pending, mac_off) {
                                     (0, Some(0)) => "Mac offline".to_string(),
                                     (0, Some(at)) => format!("Mac offline · {}", theme::ago(at)),
@@ -262,6 +267,7 @@ pub fn App() -> impl IntoElement {
                                 }
                             }
                             Some(Err(e)) => {
+                                presence.set(chat::Presence::Offline);
                                 sync_line.set("offline".into());
                                 status.set(format!("Offline: {}", e.chars().take(80).collect::<String>()));
                             }
@@ -497,6 +503,7 @@ pub fn App() -> impl IntoElement {
             reply: thread_reply,
             catalog,
             close: close_thread.clone(),
+            presence,
             photo: std::rc::Rc::new(move || {
                 let add = add_photo.clone();
                 app_owner.run(|| spawn(async move {
@@ -994,12 +1001,8 @@ pub fn App() -> impl IntoElement {
                         if thread_open.get().is_none() {
                             return top_bar().into_element();
                         }
-                        let line = sync_line.get();
-                        if line == "in sync" || line.is_empty() {
-                            return view().into_element();
-                        }
-                        let health = if line == "offline" || line.starts_with("Mac offline") { Health::Bad } else { Health::Warn };
-                        view().flex_row().items_center().px_4().h(px(24.0)).bg(c(tokens::GROUND)).child(status_tag(health, line)).into_element()
+                        // Dentro de un hilo no hay franja: quién contesta va en la esquina del cuadro de escribir.
+                        view().into_element()
                     }))
                     .child(
                         view()

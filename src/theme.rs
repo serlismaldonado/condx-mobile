@@ -343,6 +343,9 @@ pub const ARROW_DOWN: &[&str] = &["M12 5v14", "m19 12-7 7-7-7"];
 pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 1 0 0 6"];
 /// Agregar (un hilo nuevo).
 pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
+/// Una laptop (la Mac contesta) y una nube (contesta el sitio en la nube). Trazos de Lucide (ISC).
+pub const LAPTOP: &[&str] = &["M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9", "M2 20h20", "M4 16h16l1.5 4h-19Z"];
+pub const CLOUD: &[&str] = &["M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"];
 /// Escribir un mensaje nuevo (lápiz sobre un cuadrado).
 pub const COMPOSE: &[&str] = &["M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7", "M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"];
 
