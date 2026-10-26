@@ -2427,7 +2427,7 @@ dependencies = [
 
 [[package]]
 name = "nsh-app-condx-mobile"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "age",
  "convex",
