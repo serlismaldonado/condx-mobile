@@ -8,6 +8,7 @@
 //!
 //! La red y el almacenamiento corren fuera del hilo de la interfaz (`blocking`).
 
+pub mod chat;
 pub mod scan;
 pub mod secure;
 pub mod sync;
@@ -603,7 +604,9 @@ pub fn App() -> impl IntoElement {
                                             .child(status_tag(Health::Warn, "Waiting for the Mac…")),
                                     )
                                     .into_element(),
-                                Screen::Ready => scroll()
+                                Screen::Ready => view()
+                                    .flex_1()
+                                    .child(scroll()
                                     .flex_1()
                                     .child(
                                         view()
@@ -627,15 +630,15 @@ pub fn App() -> impl IntoElement {
                                             }))
                                             .child(dynamic(move || {
                                                 if tab.get() != "approvals" {
-                                                    return view().into_element();
+                                                    return view().hidden().into_element();
                                                 }
-                                                if visible().is_empty() { card().child(muted("Nothing is waiting for your approval.")).into_element() } else { view().into_element() }
+                                                if visible().is_empty() { card().child(muted("Nothing is waiting for your approval.")).into_element() } else { view().hidden().into_element() }
                                             }))
                                             .child(dynamic({
                                                 let row = row.clone();
                                                 move || {
                                                 if tab.get() != "approvals" {
-                                                    return view().into_element();
+                                                    return view().hidden().into_element();
                                                 }
                                                 view().gap_3().child(each(
                                                     visible,
@@ -647,7 +650,7 @@ pub fn App() -> impl IntoElement {
                                                 let incident_row = incident_row.clone();
                                                 move || {
                                                 if tab.get() != "incidents" {
-                                                    return view().into_element();
+                                                    return view().hidden().into_element();
                                                 }
                                                 if incidents.get().is_empty() {
                                                     return card().child(status_tag(Health::Ok, "No incidents. Everything Condx watches is fine.")).into_element();
@@ -659,16 +662,21 @@ pub fn App() -> impl IntoElement {
                                                 )).into_element()
                                             }}))
                                             .child(dynamic({
-                                                let send_thread = send_thread.clone();
                                                 move || {
                                                     if tab.get() != "threads" {
-                                                        return view().into_element();
+                                                        return view().hidden().into_element();
                                                     }
-                                                    thread_view(threads.get(), thread_open, thread_text, send_thread.clone()).into_element()
+                                                    if thread_open.get().is_some() { view().hidden().into_element() } else { chat::list(threads.get(), thread_open, thread_text).into_element() }
                                                 }
                                             }))
-                                            .child(view().pt_2().child(section("This phone")))
-                                            .child(
+                                            // Este teléfono: abajo de aprobaciones e incidentes (en los hilos, el chat ocupa la pantalla).
+                                            .child(dynamic({
+                                                let unpair = unpair.clone();
+                                                move || {
+                                                if tab.get() == "threads" {
+                                                    return view().hidden().into_element();
+                                                }
+                                                view().gap_3().pt_2().child(section("This phone")).child(
                                                 card()
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
                                                     .child(kv("Stored in", text(secure::backend()).text_size(px(13.0))))
@@ -690,112 +698,24 @@ pub fn App() -> impl IntoElement {
                                                         kv("Keys", content).into_element()
                                                     }))
                                                     .child(view().flex_row().pt_1().child(theme::button("Unpair this phone", Variant::Outline, unpair.clone()))),
-                                            ),
-                                    )
+                                            
+                                                ).into_element()
+                                            }})),
+                                    ))
+                                    // Un hilo abierto: el chat a pantalla completa, encima.
+                                    .child(dynamic({
+                                        let send_thread = send_thread.clone();
+                                        move || {
+                                            let t = (tab.get() == "threads").then(|| thread_open.get()).flatten().and_then(|id| threads.get().into_iter().find(|t| t.id == id));
+                                            match t {
+                                                Some(t) => view().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).child(chat::screen(t, thread_open, thread_text, send_thread.clone())).into_element(),
+                                                None => view().into_element(),
+                                            }
+                                        }
+                                    }))
                                     .into_element(),
                             })),
                     ),
             ),
-        )
-}
-
-fn thread_health(status: &str) -> Health {
-    match status {
-        "running" | "waiting-approval" | "waiting-answer" => Health::Warn,
-        "succeeded" | "done" => Health::Ok,
-        "failed" | "stopped" => Health::Bad,
-        _ => Health::Unknown,
-    }
-}
-
-fn thread_state(t: &Thread) -> String {
-    match t.status.as_str() {
-        "running" => "Working…".into(),
-        "waiting-approval" => "Waiting for your approval (Approvals tab)".into(),
-        "waiting-answer" => "Waiting for your answer".into(),
-        "succeeded" => "Done".into(),
-        "done" => "Waiting for you".into(),
-        "cancelled" => "Cancelled".into(),
-        "failed" => "Failed".into(),
-        "stopped" => "Stopped".into(),
-        other => other.to_string(),
-    }
-}
-
-/// La lista de hilos o, si hay uno abierto, sus mensajes y dónde escribir.
-fn thread_view(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<String>, send: impl Fn(String, String) + Clone + 'static) -> View {
-    let Some(t) = open.get().and_then(|id| list.iter().find(|t| t.id == id).cloned()) else {
-        if list.is_empty() {
-            return view().child(card().child(muted("No threads yet. Flows with agents (Condx → Workflows) open one per run; you can follow and steer them here.")));
-        }
-        let mut col = view().gap_3();
-        for t in list {
-            let id = t.id.clone();
-            let last = t.items.iter().rev().find_map(|i| i["text"].as_str().map(str::to_string)).unwrap_or_default();
-            let last: String = last.lines().next().unwrap_or("").chars().take(110).collect();
-            col = col.child(
-                card()
-                    .child(view().flex_row().gap_2().items_center().child(view().flex_1().child(text(t.title.clone()).text_size(px(14.0)).text_color(c(tokens::FG)))).child(kind_tag(&t.kind)))
-                    .child(status_tag(thread_health(&t.status), format!("{} · {}", thread_state(&t), theme::ago(t.updated_at))))
-                    .child(muted(last))
-                    .child(view().flex_row().pt_1().child(theme::button("Open", Variant::Outline, move || open.set(Some(id.clone()))))),
-            );
-        }
-        return col;
-    };
-    let mut items = view().gap_2();
-    for it in t.items.iter().rev().take(25).rev() {
-        let body = it["text"].as_str().unwrap_or_default().to_string();
-        let kind = it["kind"].as_str().unwrap_or("system");
-        let el = match kind {
-            "user" => view().flex_row().child(view().flex_1()).child(view().p_2().border_1().border_color(c(tokens::CARD_BORDER)).bg(c(tokens::CARD)).child(text(body).text_size(px(13.0)).text_color(c(tokens::FG)))).into_element(),
-            "agent" | "reply" => view()
-                .gap_1()
-                .child(text(it["author"].as_str().unwrap_or("Agent").to_string()).text_size(px(12.0)).text_color(c(tokens::ACCENT)))
-                .child(text(body).text_size(px(13.0)).text_color(c(tokens::FG)))
-                .into_element(),
-            "event" => status_tag(Health::Bad, body).into_element(),
-            "question" => view().gap_1().child(status_tag(Health::Warn, "The flow asks you")).child(text(body).text_size(px(13.0)).text_color(c(tokens::FG))).into_element(),
-            "approval" => status_tag(Health::Warn, format!("{body} · approve it in the Approvals tab")).into_element(),
-            _ => muted(body).into_element(),
-        };
-        items = items.child(el);
-    }
-    // Los participantes: tocar uno lo menciona.
-    let mut people = view().flex_row().gap_1().flex_wrap();
-    for p in &t.participants {
-        let handle = p["node"].as_str().unwrap_or_default().to_string();
-        let name = p["name"].as_str().unwrap_or(&handle).to_string();
-        people = people.child(theme::button(format!("@{name}"), Variant::Outline, move || text_sig.set(format!("@{handle} "))));
-    }
-    let id = t.id.clone();
-    let placeholder: &'static str = if t.waiting_answer { "Answer the question…" } else { "Write to the agents… (@name to ask one)" };
-    view()
-        .gap_3()
-        .child(view().flex_row().child(theme::button("← Threads", Variant::Outline, move || open.set(None))))
-        .child(
-            card()
-                .child(text(t.title.clone()).text_size(px(15.0)).text_color(c(tokens::FG)))
-                .child(status_tag(thread_health(&t.status), thread_state(&t)))
-                .child(people),
-        )
-        .child(card().child(items))
-        .child(
-            card()
-                .child(field(placeholder, text_sig))
-                .child(view().flex_row().pt_1().child(theme::button("Send", Variant::Primary, move || {
-                    let msg = text_sig.get().trim().to_string();
-                    if msg.is_empty() {
-                        return;
-                    }
-                    text_sig.set(String::new());
-                    send(id.clone(), msg);
-                })))
-                .child(match (&t.result, t.waiting) {
-                    (_, true) => status_tag(Health::Unknown, "Sending… the Mac answers in the thread").into_element(),
-                    (Some(r), false) if r.starts_with("rejected") => status_tag(Health::Bad, r.clone()).into_element(),
-                    (Some(r), false) => status_tag(Health::Ok, r.clone()).into_element(),
-                    _ => view().into_element(),
-                }),
         )
 }

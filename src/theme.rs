@@ -42,6 +42,9 @@ pub mod tokens {
     pub const SUCCESS: (u32, u32) = tone(0x16a34a, 0x22c55e);
     pub const WARNING: (u32, u32) = tone(0xd97706, 0xf59e0b);
     pub const DANGER: (u32, u32) = tone(0xdc2626, 0xef4444);
+    /// Para distinguir agentes (la inicial en el chat).
+    pub const INFO: (u32, u32) = tone(0x2563eb, 0x60a5fa);
+    pub const VIOLET: (u32, u32) = tone(0x7c3aed, 0xa78bfa);
     /// Producción (`kind_tag`).
     pub const PROD: (u32, u32) = tone(0xd9534b, 0xe5756e);
 }
