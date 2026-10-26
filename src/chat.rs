@@ -538,7 +538,12 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                 .child(if it["status"] == "queued" {
                     text("Queued · goes out when an agent is free").text_size(px(11.0)).text_color(c(tokens::WARNING)).into_element()
                 } else {
-                    text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE)).into_element()
+                    // ✓✓ junto a la hora cuando un agente ya lo leyó.
+                    let mut row = view().flex_row().items_center().gap(px(4.0)).child(text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE)));
+                    if it["mark"] == "read" {
+                        row = row.child(text("✓✓").text_size(px(10.0)).text_color(c(tokens::ACCENT)));
+                    }
+                    row.into_element()
                 });
             let to = Some((None, "you".to_string(), snippet));
             let long = to.clone();
@@ -754,13 +759,14 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                     ),
                 );
             }
-            // ✓✓ bajo tu último mensaje cuando un agente ya lo tomó.
+            // ✓✓ junto a la hora de tu último mensaje cuando un agente ya lo tomó.
             let last_user = t.items.iter().rposition(|i| i["kind"] == "user").filter(|_| t.read && t.sending.is_none());
             for (ix, it) in t.items.iter().enumerate().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
-                items = items.child(message(it, Some(ix) == last_question && t.waiting_answer, &quick, approvals, &decide, reply, &handles));
+                let mut it = it.clone();
                 if Some(ix) == last_user {
-                    items = items.child(view().items_end().mt(px(-10.0)).child(text("✓✓").text_size(px(12.0)).text_color(c(tokens::ACCENT))));
+                    it["mark"] = "read".into();
                 }
+                items = items.child(message(&it, Some(ix) == last_question && t.waiting_answer, &quick, approvals, &decide, reply, &handles));
             }
             // Lo que acabas de mandar, al instante, hasta que el daemon lo contesta.
             if let Some(pending) = t.sending.clone() {
@@ -772,7 +778,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .opacity(0.75)
                         .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
                         // Enviándose (todavía en el teléfono): gira; ya en la nube, esperando al agente: ✓.
-                        .child(if t.delivered { view().child(text("✓").text_size(px(12.0)).text_color(c(tokens::SUBTLE))) } else { live::spinner(12.0) }),
+                        .child(view().flex_row().items_center().gap(px(4.0)).child(text("now").text_size(px(11.0)).text_color(c(tokens::SUBTLE))).child(if t.delivered { view().child(text("✓").text_size(px(10.0)).text_color(c(tokens::SUBTLE))) } else { live::spinner(10.0) })),
                 );
             }
             // Con un agente escribiendo, su burbuja ya dice que trabaja.
