@@ -492,7 +492,8 @@ impl Phone {
             .rows(&self.threads_scope)
             .into_iter()
             // `_mac` y `_new` no son hilos: la llave de la Mac y donde se piden hilos nuevos.
-            .filter(|r| !r.row.id.starts_with('_'))
+            // Tampoco el resumen del sitio en la nube (`site-overview`).
+            .filter(|r| !r.row.id.starts_with('_') && r.row.id != "site-overview")
             .map(|r| {
                 let v = &r.row.values;
                 let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
@@ -675,17 +676,29 @@ impl Phone {
             return RunState::default();
         }
         let request_id = v.get("requestId").and_then(Value::as_str);
-        let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id;
-        RunState { waiting: r.pending || !answered, result: v.get("result").and_then(Value::as_str).filter(|_| answered).map(str::to_string) }
+        // Lo contesta la Mac (`resultFor`) o, con la Mac apagada, el sitio en la nube (`siteFor`).
+        let by_mac = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id;
+        let by_site = request_id.is_some() && v.get("siteFor").and_then(Value::as_str) == request_id;
+        let result = if by_mac { v.get("result") } else if by_site { v.get("siteResult") } else { None };
+        RunState { waiting: r.pending || !(by_mac || by_site), result: result.and_then(Value::as_str).map(str::to_string) }
     }
 
     /// El resumen de cada proyecto (la fila `_overview` que publica la Mac): git, deployer, servicios,
     /// lo que pide atención y los detalles de cada entorno. `Null` si la Mac todavía no lo publicó.
     pub fn overview(&self) -> Value {
+        self.overview_of("_overview")
+    }
+
+    /// El resumen del sitio en la nube (`site-overview`): sus servicios locales, con la Mac apagada.
+    pub fn site_overview(&self) -> Value {
+        self.overview_of("site-overview")
+    }
+
+    fn overview_of(&self, row: &str) -> Value {
         self.engine
             .rows(&self.threads_scope)
             .into_iter()
-            .find(|r| r.row.id == "_overview")
+            .find(|r| r.row.id == row)
             .and_then(|r| r.row.values.get("overview").and_then(Value::as_str).and_then(|t| serde_json::from_str::<Value>(t).ok()))
             .unwrap_or(Value::Null)
     }

@@ -36,6 +36,10 @@ fn empty(title: &'static str, detail: &'static str) -> View {
 /// de arriba y cómo pedir algo a un servicio.
 pub struct EnvsCtx {
     pub overview: Value,
+    /// El resumen del sitio en la nube: sus servicios corren ahí cuando la Mac está apagada.
+    pub site: Value,
+    /// Si el sitio en la nube contesta (la Mac está apagada y el sitio, encendido).
+    pub cloud_on: bool,
     pub running_jobs: usize,
     pub approvals: usize,
     /// Si la Mac está encendida: los servicios corren en ella, sin ella no se manejan.
@@ -110,7 +114,13 @@ fn service_row(project: &str, svc: &Value, ctx: &EnvsCtx) -> View {
         .items_center()
         .child(theme::dot(health))
         .child(view().flex_1().child(text(st("title")).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))));
-    if ctx.mac_on && busy.is_none() {
+    let can_ask = ctx.mac_on || ctx.cloud_on;
+    if let Some(url) = svc["openUrl"].as_str().filter(|_| status == "running").map(str::to_string) {
+        title_row = title_row.child(theme::small_button("Open", Variant::Outline, move || {
+            let _ = crate::scan::open_url(&url);
+        }));
+    }
+    if can_ask && busy.is_none() {
         let ask = |action: &'static str| {
             let send = ctx.send.clone();
             let asked = ctx.asked;
@@ -207,7 +217,9 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
         };
         col = col.child(status_tag(health, line));
     }
-    if !ctx.mac_on {
+    if !ctx.mac_on && ctx.cloud_on {
+        col = col.child(muted("The Mac is off: local services run on the cloud site, with their own data."));
+    } else if !ctx.mac_on {
         col = col.child(muted("The Mac is off: its local services can be started when it's back."));
     }
     let mut projects: Vec<String> = list.iter().map(|e| e.project.clone()).collect();
@@ -301,11 +313,17 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
         }
         block = block.child(rows(items));
         // Los servicios locales: el backend, el deployer y el frontend del proyecto.
-        let services: Vec<Value> = sum["services"].as_array().cloned().unwrap_or_default();
+        // Con la Mac apagada, los del sitio en la nube (el mismo proyecto, clonado allá).
+        let services: Vec<Value> = if ctx.mac_on {
+            sum["services"].as_array().cloned().unwrap_or_default()
+        } else {
+            ctx.site["projects"].as_array().into_iter().flatten().find(|p| p["name"] == project.as_str()).and_then(|p| p["services"].as_array().cloned()).unwrap_or_default()
+        };
         if !services.is_empty() {
             let stopped = services.iter().filter(|s| s["status"] != "running").count();
-            let mut head = view().flex_row().items_center().pt(px(4.0)).child(view().flex_1().child(muted("Local services")));
-            if ctx.mac_on && services.iter().all(|s| s["busy"].is_null()) {
+            let where_ = if ctx.mac_on { "Local services" } else { "Services on the cloud site" };
+            let mut head = view().flex_row().items_center().pt(px(4.0)).child(view().flex_1().child(muted(where_)));
+            if (ctx.mac_on || ctx.cloud_on) && services.iter().all(|s| s["busy"].is_null()) {
                 let (label, action) = if stopped > 0 { ("Start all", "start") } else { ("Stop all", "stop") };
                 let send = ctx.send.clone();
                 let asked = ctx.asked;

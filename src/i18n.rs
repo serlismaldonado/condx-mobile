@@ -158,6 +158,9 @@ const ES: &[(&str, &str)] = &[
     ("starting", "arrancando"),
     ("error", "error"),
     ("The Mac is off: its local services can be started when it's back.", "La Mac está apagada: sus servicios locales se manejan cuando vuelva."),
+    ("Open", "Abrir"),
+    ("Services on the cloud site", "Servicios en el sitio en la nube"),
+    ("The Mac is off: local services run on the cloud site, with their own data.", "La Mac está apagada: los servicios locales corren en el sitio en la nube, con sus propios datos."),
     // Avisos.
     ("Install", "Instalar"),
 ];

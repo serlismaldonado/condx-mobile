@@ -101,6 +101,7 @@ pub fn App() -> impl IntoElement {
     // El resumen de cada proyecto (servicios, git, lo que pide atención) y si se pidió algo a un servicio.
     let overview = signal(serde_json::Value::Null);
     let service_asked = signal(false);
+    let site_overview = signal(serde_json::Value::Null);
     let open_projects = signal(theme::pref("openProjects").as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default());
     // Pedir correr una receta o un flujo: el formulario, el catálogo de la Mac y cómo va lo pedido.
     let run_form = ops::RunForm::new();
@@ -283,6 +284,10 @@ pub fn App() -> impl IntoElement {
                                         run_state.set(st);
                                     }
                                 }
+                                if let Some(so) = with_phone(&slot, |p| p.site_overview()).await
+                                    && site_overview.get() != so {
+                                        site_overview.set(so);
+                                    }
                                 if let Some((es, js, ov)) = with_phone(&slot, |p| (p.envs(), p.jobs(), p.overview())).await {
                                     if envs.get() != es {
                                         envs.set(es);
@@ -1193,6 +1198,8 @@ pub fn App() -> impl IntoElement {
                                                     }
                                                     let ctx = ops::EnvsCtx {
                                                         overview: overview.get(),
+                                                        site: site_overview.get(),
+                                                        cloud_on: presence.get() == chat::Presence::Cloud,
                                                         running_jobs: jobs.get().iter().filter(|j| matches!(j.status.as_str(), "running" | "queued")).count(),
                                                         approvals: waiting_count.get(),
                                                         mac_on: presence.get() == chat::Presence::Mac,
