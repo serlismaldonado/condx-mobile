@@ -265,7 +265,14 @@ pub struct Phone {
     /// El deployment y el token del teléfono: para subir adjuntos a `/files`.
     url: String,
     token: String,
+    /// El timbre en vivo (se abre al sincronizar con la app a la vista; se cierra de fondo) y cuándo
+    /// sonó por HTTP por última vez: aunque el socket diga que anda, uno cada minuto por las dudas.
+    bell: Option<crate::bell::Bell>,
+    rung_at: i64,
 }
+
+/// Cada cuánto suena por HTTP aunque el timbre en vivo ande (un socket caído que no se notó).
+const SAFETY_RING_MS: i64 = 60_000;
 
 pub type Shared = Arc<Mutex<Phone>>;
 
@@ -289,14 +296,30 @@ impl Phone {
         engine.enable_scope(&threads_scope, None).map_err(|e| e.to_string())?;
         let age = identity.age.as_deref().and_then(|a| a.parse::<age::x25519::Identity>().ok());
         let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
-        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, age, url: identity.url.clone(), token: identity.token.clone() })
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, age, url: identity.url.clone(), token: identity.token.clone(), bell: None, rung_at: 0 })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
     pub fn sync(&mut self) -> Result<Vec<Approval>, String> {
-        match self.transport.doorbell(&[self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone(), self.threads_scope.clone()], PROTOCOL_VERSION).map_err(|e| e.to_string())? {
-            Doorbell::Versions(v) => self.engine.on_doorbell(&v, now_ms()).map_err(|e| e.to_string())?,
-            Doorbell::UpgradeRequired => return Err("Condx Cloud needs a newer app".into()),
+        let scopes = [self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone(), self.threads_scope.clone()];
+        let bell = self.bell.get_or_insert_with(|| crate::bell::Bell::start(&self.url, &self.token, &scopes, PROTOCOL_VERSION));
+        let now = now_ms();
+        // Con el timbre en vivo, solo lo que sonó; sin él (o de vez en cuando), el de HTTP.
+        let rung = if bell.is_live() && now - self.rung_at < SAFETY_RING_MS {
+            match bell.take() {
+                Some(v) if v["status"] == "upgradeRequired" => Some(Doorbell::UpgradeRequired),
+                Some(v) => Some(Doorbell::Versions(serde_json::from_value(v["versions"].clone()).map_err(|e| format!("unexpected doorbell: {e}"))?)),
+                None => None,
+            }
+        } else {
+            bell.take();
+            self.rung_at = now;
+            Some(self.transport.doorbell(&scopes, PROTOCOL_VERSION).map_err(|e| e.to_string())?)
+        };
+        match rung {
+            Some(Doorbell::Versions(v)) => self.engine.on_doorbell(&v, now).map_err(|e| e.to_string())?,
+            Some(Doorbell::UpgradeRequired) => return Err("Condx Cloud needs a newer app".into()),
+            None => {}
         }
         block_on(sync_once(&mut self.engine, &self.transport, now_ms, 50)).map_err(|e| e.to_string())?;
         Ok(self.approvals())
@@ -428,12 +451,14 @@ impl Phone {
         self.thread_send_with(thread_id, text, &[])
     }
 
-    /// «La app está abierta»: el daemon mira seguido (cada 3 s) solo mientras esto cambia; si no, cada
-    /// 30 s. Va en la fila `_new` (un campo que el daemon no escribe), con la hora solo como cambio.
-    pub fn here(&mut self) -> Result<(), String> {
-        let mut set = Values::new();
-        set.insert("seenAt".into(), json!(now_ms()));
-        self.engine.commit(vec![OpDraft::patch(&self.threads_scope, "_new", set)], now_ms()).map(|_| ()).map_err(|e| e.to_string())
+    /// De fondo: se cierra el timbre en vivo (sin socket abierto); al volver se abre de nuevo.
+    pub fn pause(&mut self) {
+        self.bell = None;
+    }
+
+    /// Si el timbre en vivo sonó (hay algo nuevo en la nube) y si anda.
+    pub fn bell(&self) -> (bool, bool) {
+        self.bell.as_ref().map(|b| (b.rang(), b.is_live())).unwrap_or((false, false))
     }
 
     /// La fila donde se pide un hilo nuevo, como un hilo vacío («New thread»): lo que se mandó desde

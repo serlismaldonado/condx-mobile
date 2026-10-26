@@ -9,6 +9,7 @@
 //! La red y el almacenamiento corren fuera del hilo de la interfaz (`blocking`).
 
 pub mod audio;
+pub mod bell;
 pub mod chat;
 pub mod live;
 pub mod logos;
@@ -149,8 +150,8 @@ pub fn App() -> impl IntoElement {
     {
         let slot = slot.clone();
         spawn(async move {
-            // Cuándo se preguntó si el teléfono sigue vinculado y cuándo se avisó que la app está abierta.
-            let (mut checked, mut seen): (Option<std::time::Instant>, Option<std::time::Instant>) = (None, None);
+            // Cuándo se preguntó si el teléfono sigue vinculado.
+            let mut checked: Option<std::time::Instant> = None;
             loop {
                 let id = blocking(secure::load).await.ok().and_then(|r| r.ok()).flatten();
                 let Some(id) = id else {
@@ -163,7 +164,9 @@ pub fn App() -> impl IntoElement {
                 // De fondo, nada (ni red): Android no congela la app enseguida. Al volver, se pregunta y
                 // se avisa de nuevo.
                 if !blocking(scan::in_foreground).await.unwrap_or(true) {
-                    (checked, seen) = (None, None);
+                    if checked.take().is_some() {
+                        with_phone(&slot, |p| p.pause()).await;
+                    }
                     timer(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -192,10 +195,6 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
-                        if !seen.is_some_and(|t| t.elapsed() < Duration::from_secs(60))
-                            && let Some(Ok(())) = with_phone(&slot, |p| p.here()).await {
-                                seen = Some(std::time::Instant::now());
-                            }
                         match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads()))).await {
                             Some(Ok((list, pending, incs, ks, can, ths))) => {
                                 // El hilo pedido desde un incidente: abrirlo cuando el daemon contesta.
@@ -270,12 +269,14 @@ pub fn App() -> impl IntoElement {
                     None => {}
                 }
                 tick.set(tick.get().wrapping_add(1));
-                // Cada 2 s; cada medio segundo mientras algo de este teléfono espera respuesta o un agente escribe, y enseguida
-                // al mandar algo (`kick`).
+                // Enseguida al mandar algo (`kick`).
                 let busy = threads.get().iter().any(|t| t.waiting || t.items.iter().any(|i| i["live"] == true)) || incidents.get().iter().any(|i| i.waiting) || approvals.get().iter().any(|a| a.pending) || pending_thread.get().is_some();
-                let steps = if busy { 2 } else { 8 };
+                // Con el timbre en vivo se espera a que suene (o a mandar algo), hasta un minuto; sin él,
+                // cada 4 s (cada segundo mientras algo espera respuesta).
+                let live = with_phone(&slot, |p| p.bell().1).await.unwrap_or(false);
+                let steps = if live { 240 } else if busy { 4 } else { 16 };
                 for _ in 0..steps {
-                    if kick.get() {
+                    if kick.get() || (live && with_phone(&slot, |p| p.bell().0).await.unwrap_or(false)) {
                         break;
                     }
                     timer(Duration::from_millis(250)).await;
