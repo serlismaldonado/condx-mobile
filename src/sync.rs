@@ -428,6 +428,14 @@ impl Phone {
         self.thread_send_with(thread_id, text, &[])
     }
 
+    /// «La app está abierta»: el daemon mira seguido (cada 3 s) solo mientras esto cambia; si no, cada
+    /// 30 s. Va en la fila `_new` (un campo que el daemon no escribe), con la hora solo como cambio.
+    pub fn here(&mut self) -> Result<(), String> {
+        let mut set = Values::new();
+        set.insert("seenAt".into(), json!(now_ms()));
+        self.engine.commit(vec![OpDraft::patch(&self.threads_scope, "_new", set)], now_ms()).map(|_| ()).map_err(|e| e.to_string())
+    }
+
     /// La fila donde se pide un hilo nuevo, como un hilo vacío («New thread»): lo que se mandó desde
     /// aquí y qué contestó el daemon («thread <id>» con el hilo creado).
     pub fn new_thread(&self) -> Thread {

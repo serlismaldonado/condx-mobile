@@ -210,6 +210,17 @@ mod platform {
         })
     }
 
+    /// Si la app está a la vista (Android no la congela enseguida al salir: sin esto seguiría
+    /// sincronizando de fondo). `ActivityManager.getMyMemoryState`: importancia 100 = en primer plano.
+    pub fn in_foreground() -> bool {
+        with_env(|env| {
+            let info = j!(env, "state", env.new_object("android/app/ActivityManager$RunningAppProcessInfo", "()V", &[]));
+            j!(env, "state", env.call_static_method("android/app/ActivityManager", "getMyMemoryState", "(Landroid/app/ActivityManager$RunningAppProcessInfo;)V", &[JValue::Object(&info)]));
+            Ok(j!(env, "state", env.get_field(&info, "importance", "I").and_then(|v| v.i())) <= 100)
+        })
+        .unwrap_or(true)
+    }
+
     fn resolver<'a>(env: &mut JNIEnv<'a>) -> Result<JObject<'a>, String> {
         let ctx = context(env)?;
         env.call_method(&ctx, "getContentResolver", "()Landroid/content/ContentResolver;", &[]).and_then(|v| v.l()).map_err(jerr)
@@ -373,6 +384,9 @@ mod platform {
     pub fn open_url(_url: &str) -> Result<(), String> {
         Err("can't open links here".into())
     }
+    pub fn in_foreground() -> bool {
+        true
+    }
     pub fn start_photo() -> Result<(), String> {
         Err("there's no camera here".into())
     }
@@ -381,7 +395,7 @@ mod platform {
     }
 }
 
-pub use platform::{cancel, clipboard, open_camera_app, open_url, pending, poll, poll_photo, start, start_photo};
+pub use platform::{cancel, clipboard, in_foreground, open_camera_app, open_url, pending, poll, poll_photo, start, start_photo};
 
 /// En qué va una foto para adjuntar.
 #[derive(Debug, Clone, PartialEq)]

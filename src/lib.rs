@@ -149,6 +149,8 @@ pub fn App() -> impl IntoElement {
     {
         let slot = slot.clone();
         spawn(async move {
+            // Cuándo se preguntó si el teléfono sigue vinculado y cuándo se avisó que la app está abierta.
+            let (mut checked, mut seen): (Option<std::time::Instant>, Option<std::time::Instant>) = (None, None);
             loop {
                 let id = blocking(secure::load).await.ok().and_then(|r| r.ok()).flatten();
                 let Some(id) = id else {
@@ -158,10 +160,24 @@ pub fn App() -> impl IntoElement {
                     timer(Duration::from_secs(1)).await;
                     continue;
                 };
+                // De fondo, nada (ni red): Android no congela la app enseguida. Al volver, se pregunta y
+                // se avisa de nuevo.
+                if !blocking(scan::in_foreground).await.unwrap_or(true) {
+                    (checked, seen) = (None, None);
+                    timer(Duration::from_secs(1)).await;
+                    continue;
+                }
                 fingerprint.set(sync::fingerprint_of(&id));
-                let state = {
+                // Si sigue vinculado: al abrir y cada minuto (no en cada vuelta).
+                let state = if checked.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) && slot.lock().map(|g| g.is_some()).unwrap_or(false) {
+                    Some(Ok("active".to_string()))
+                } else {
                     let id = id.clone();
-                    blocking(move || sync::device_status(&id)).await.ok()
+                    let s = blocking(move || sync::device_status(&id)).await.ok();
+                    if matches!(s, Some(Ok(_))) {
+                        checked = Some(std::time::Instant::now());
+                    }
+                    s
                 };
                 match state {
                     Some(Ok(s)) if s == "active" => {
@@ -176,6 +192,10 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
+                        if !seen.is_some_and(|t| t.elapsed() < Duration::from_secs(60))
+                            && let Some(Ok(())) = with_phone(&slot, |p| p.here()).await {
+                                seen = Some(std::time::Instant::now());
+                            }
                         match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads()))).await {
                             Some(Ok((list, pending, incs, ks, can, ths))) => {
                                 // El hilo pedido desde un incidente: abrirlo cuando el daemon contesta.
