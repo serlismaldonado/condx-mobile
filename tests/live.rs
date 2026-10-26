@@ -256,3 +256,40 @@ fn hilos_desde_el_telefono() {
     let t = if t.status == "succeeded" { t } else { wait(&mut phone, "the flow to finish", &|t| t.status == "succeeded") };
     assert!(t.items.iter().any(|i| i["kind"] == "user" && i["text"] == "yes, go ahead"), "{:?}", t.items);
 }
+
+#[test]
+#[ignore = "needs a throwaway condxd linked to a throwaway Condx Cloud, with the scripted agent and a flow named “Triage, ask, notify” that already ran"]
+fn adjuntos_en_un_hilo() {
+    let (mut phone, _device) = paired_phone("Attachments phone");
+    let threads = daemon("GET", "/api/threads", None);
+    let rid = threads["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "flow" && r["title"].as_str().unwrap_or("").contains("Triage, ask")).expect("a flow thread")["id"].as_str().unwrap().to_string();
+    // La llave de la Mac llega con los hilos.
+    wait_for(|| { let _ = phone.sync(); phone.mac_recipient().is_some() }, "the Mac's key");
+    // Un PNG de 1×1 y un archivo de texto, cifrados y subidos.
+    let png = base64_png();
+    let img = phone.upload(&png).unwrap();
+    let txt = phone.upload(b"orders.total is null when the cart is empty\n").unwrap();
+    let files = vec![
+        sync::Attachment { id: img, name: "screen.png".into(), mime: "image/png".into(), kind: "image".into(), seconds: None },
+        sync::Attachment { id: txt, name: "notes.txt".into(), mime: "text/plain".into(), kind: "file".into(), seconds: None },
+    ];
+    phone.thread_send_with(&rid, "@risk look at these", &files).unwrap();
+    let t = (0..120).find_map(|_| {
+        let _ = phone.sync();
+        let t = phone.threads().into_iter().find(|t| t.id == rid && !t.waiting && t.result.is_some());
+        if t.is_none() { std::thread::sleep(std::time::Duration::from_millis(500)); }
+        t
+    }).expect("the daemon's answer");
+    assert_eq!(t.result.as_deref(), Some("sent to risk"), "{:?}", t.result);
+    // El agente recibió el texto del archivo (en su conversación) y la imagen.
+    let run = daemon("GET", &format!("/api/agent-runs/{rid}-risk"), None);
+    let transcript = run["transcript"].to_string();
+    assert!(transcript.contains("[file: notes.txt]") && transcript.contains("orders.total is null"), "{transcript}");
+    assert!(transcript.contains("[image: screen.png]"), "{transcript}");
+}
+
+fn base64_png() -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(2, 2, image::Rgb([200, 30, 30])).write_to(&mut out, image::ImageFormat::Png).unwrap();
+    out.into_inner()
+}

@@ -42,6 +42,15 @@ pub mod tokens {
     pub const SUCCESS: (u32, u32) = tone(0x16a34a, 0x22c55e);
     pub const WARNING: (u32, u32) = tone(0xd97706, 0xf59e0b);
     pub const DANGER: (u32, u32) = tone(0xdc2626, 0xef4444);
+    /// Código: el fondo de los bloques, el código en línea y los colores del resaltado.
+    pub const CODE_BG: (u32, u32) = tone(0xf6f6f4, 0x151515);
+    pub const CODE_INLINE: (u32, u32) = tone(0xb4233c, 0xf08ca0);
+    pub const SYN_KEYWORD: (u32, u32) = tone(0x7c3aed, 0xc4a7ff);
+    pub const SYN_STRING: (u32, u32) = tone(0x15803d, 0x86d9a0);
+    pub const SYN_NUMBER: (u32, u32) = tone(0xb45309, 0xf5b44a);
+    /// Lo que escribe la persona en un hilo: el amarillo de la marca, apenas (sutil, no compite).
+    pub const USER_BUBBLE: (u32, u32) = tone(0xfdf4dc, 0x342d1c);
+    pub const USER_BUBBLE_BORDER: (u32, u32) = tone(0xf0dda8, 0x4d4124);
     /// Para distinguir agentes (la inicial en el chat).
     pub const INFO: (u32, u32) = tone(0x2563eb, 0x60a5fa);
     pub const VIOLET: (u32, u32) = tone(0x7c3aed, 0xa78bfa);
@@ -247,4 +256,77 @@ pub fn slide_to_confirm(label: impl Into<String>, on_done: impl Fn() + Clone + '
                 )
                 .into_element()
         }))
+}
+
+/// Botón chico (30 de alto, ancho justo): las acciones de una tarjeta, que no compiten con su
+/// contenido.
+pub fn small_button(label: impl Into<String>, variant: Variant, on_press: impl Fn() + 'static) -> View {
+    let label: String = label.into();
+    let (bg, border, fg) = match variant {
+        Variant::Primary => (Some(tokens::ACCENT), tokens::ACCENT, tokens::ON_ACCENT),
+        Variant::Outline => (None, tokens::CARD_BORDER, tokens::FG),
+        Variant::Danger => (None, tokens::DANGER, tokens::DANGER),
+    };
+    let mut b = view().h(px(30.0)).px_3().items_center().justify_center().rounded(px(6.0)).border_1().border_color(c(border));
+    if let Some(bg) = bg {
+        b = b.bg(c(bg));
+    }
+    b.active(move |s| if variant == Variant::Primary { s.opacity(0.85) } else { s.bg(c(tokens::ACTIVE)) })
+        .on_press(on_press)
+        .child(text(label).text_size(px(12.5)).font_weight(FontWeight::MEDIUM).text_color(c(fg)))
+}
+
+/// Control segmentado (las pestañas): un carril gris con la elegida en blanco, y un número cuando
+/// algo espera.
+/// Una pestaña: nombre, cuántas cosas esperan, si es la elegida y qué hace al tocarla.
+pub type Segment = (&'static str, usize, bool, Box<dyn Fn()>);
+
+pub fn segmented(items: Vec<Segment>) -> View {
+    let mut rail = view().flex_row().h(px(34.0)).p(px(3.0)).gap(px(3.0)).rounded(px(8.0)).bg(c(tokens::HOVER));
+    for (label, count, selected, on_press) in items {
+        let mut seg = view()
+            .flex_1()
+            .flex_row()
+            .gap(px(6.0))
+            .items_center()
+            .justify_center()
+            .rounded(px(6.0))
+            .on_press(on_press)
+            .child(text(label).text_size(px(13.0)).font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(c(if selected { tokens::FG } else { tokens::MUTED })));
+        if selected {
+            seg = seg.bg(c(tokens::CARD)).border_1().border_color(c(tokens::CARD_BORDER));
+        }
+        if count > 0 {
+            seg = seg.child(
+                view().min_w(px(18.0)).h(px(18.0)).px(px(5.0)).rounded(px(9.0)).items_center().justify_center().bg(c(tokens::ACCENT)).child(text(count.to_string()).text_size(px(11.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ON_ACCENT))),
+            );
+        }
+        rail = rail.child(seg);
+    }
+    rail
+}
+
+/// Un ícono de trazo fino (los de Lucide, como los de Claude) dibujado en un canvas desde sus trazos
+/// SVG (24×24): nsh 0.2 no trae íconos. Sigue al tema claro u oscuro.
+pub fn icon(paths: &'static [&'static str], color: (u32, u32), size: f32) -> CanvasView {
+    let k = size / 24.0;
+    canvas(move || {
+        let mut p = Painter::new().scale(k, k).stroke_style(now(color)).line_width(1.8).line_cap(nsh_core::canvas::LineCap::Round).line_join(nsh_core::canvas::LineJoin::Round);
+        for d in paths {
+            p = p.stroke_svg(d);
+        }
+        p
+    })
+    .w(px(size))
+    .h(px(size))
+}
+
+pub const MIC: &[&str] = &["M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z", "M19 10v2a7 7 0 0 1-14 0v-2", "M12 19v3"];
+/// Agregar (un hilo nuevo).
+pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
+/// Escribir un mensaje nuevo (lápiz sobre un cuadrado).
+pub const COMPOSE: &[&str] = &["M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7", "M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"];
+
+pub fn mic_icon(color: (u32, u32), size: f32) -> CanvasView {
+    icon(MIC, color, size)
 }

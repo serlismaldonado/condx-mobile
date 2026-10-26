@@ -8,7 +8,10 @@
 //!
 //! La red y el almacenamiento corren fuera del hilo de la interfaz (`blocking`).
 
+pub mod audio;
 pub mod chat;
+pub mod logos;
+pub mod md;
 pub mod scan;
 pub mod secure;
 pub mod sync;
@@ -50,6 +53,9 @@ async fn with_phone<R: Send + 'static>(slot: &Slot, f: impl FnOnce(&mut Phone) -
 #[component]
 pub fn App() -> impl IntoElement {
     let screen = signal(Screen::Loading);
+    // El dueño de la app: las tareas que arranca un botón corren bajo él (las del botón se cancelan
+    // cuando ese pedazo de la interfaz se vuelve a dibujar, p. ej. al empezar a grabar).
+    let app_owner = Owner::current();
     // Mensajes para la persona (errores, avisos) y el estado de la sincronización (barra superior).
     let status = signal(String::new());
     let sync_line = signal(String::new());
@@ -61,11 +67,28 @@ pub fn App() -> impl IntoElement {
     let incidents = signal(Vec::<Incident>::new());
     let tab = signal("approvals");
     let expanded = signal(Vec::<String>::new());
-    let agent_text = signal(String::new());
+    // El menú «⋯» abierto (uno a la vez), las respuestas que se ven enteras y el incidente cuyo hilo
+    // se pidió (se abre cuando el daemon contesta «thread <id>»).
+    let menu_open = signal(Option::<String>::None);
+    let answer_open = signal(Vec::<String>::new());
+    let pending_thread = signal(Option::<String>::None);
+    // Sincronizar ya (se mandó algo).
+    let kick = signal(false);
+    // El flujo elegido en «⋯» para desplegar un arreglo: (incidente, flujo, nombre); se confirma deslizando.
+    let deploy_pick = signal(Option::<(String, String, String)>::None);
     // Hilos (F6): las corridas de los flujos con sus agentes; el que está abierto y lo que se escribe.
     let threads = signal(Vec::<Thread>::new());
     let thread_open = signal(Option::<String>::None);
+    // La fila «_new» (pedir un hilo nuevo) tal como la ve este teléfono.
+    let new_thread = signal(Option::<Thread>::None);
     let thread_text = signal(String::new());
+    // Adjuntos del próximo mensaje, la nota de voz que se graba y el menú de adjuntar.
+    let thread_files = signal(Vec::<chat::PendingFile>::new());
+    let recording = signal(Option::<f64>::None);
+    let attach_menu = signal(false);
+    let catalog = signal(Vec::<(String, String, String)>::new());
+    // El mensaje que se está respondiendo (deslizando), hasta mandar o cancelar.
+    let thread_reply = signal(chat::ReplyTo::None);
     // Claves de proveedores cifradas para este teléfono (A6): cuáles llegaron y si se abren aquí.
     let keys = signal(Vec::<ProviderKey>::new());
     let can_keys = signal(true);
@@ -74,6 +97,24 @@ pub fn App() -> impl IntoElement {
     // Vincular: el texto del QR (o solo el código) y la URL del deployment si hace falta.
     let pairing_text = signal(String::new());
     let pairing_url = signal(String::new());
+
+    // El botón «atrás» de Android: cierra lo abierto (la cita, el hilo, el menú) antes de salir de la app.
+    on_back_press(move || {
+        if global::<md::OpenCode>().get().0.is_some() {
+            global::<md::OpenCode>().set(md::OpenCode(None));
+        } else if thread_reply.get().is_some() {
+            thread_reply.set(None);
+        } else if thread_open.get().is_some() {
+            thread_text.set(String::new());
+            thread_open.set(None);
+        } else if menu_open.get().is_some() || deploy_pick.get().is_some() {
+            menu_open.set(None);
+            deploy_pick.set(None);
+        } else {
+            return false;
+        }
+        true
+    });
 
     // Arranque y ciclo: identidad → (pendiente: esperar) → sincronizar cada 2 s.
     {
@@ -108,9 +149,37 @@ pub fn App() -> impl IntoElement {
                         screen.set(Screen::Ready);
                         match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads()))).await {
                             Some(Ok((list, pending, incs, ks, can, ths))) => {
+                                // El hilo pedido desde un incidente: abrirlo cuando el daemon contesta.
+                                if let Some(pid) = pending_thread.get()
+                                    && let Some(i) = incs.iter().find(|i| i.id == pid && !i.waiting) {
+                                        match i.result.as_deref() {
+                                            Some(r) if r.starts_with("thread ") => {
+                                                pending_thread.set(None);
+                                                thread_text.set(String::new());
+                                                thread_open.set(Some(r.trim_start_matches("thread ").to_string()));
+                                                tab.set("threads");
+                                            }
+                                            Some(r) if r.starts_with("rejected") => pending_thread.set(None),
+                                            _ => {}
+                                        }
+                                    }
                                 incidents.set(incs);
                                 if threads.get() != ths {
                                     threads.set(ths);
+                                }
+                                if let Some(cat) = with_phone(&slot, |p| p.catalog()).await
+                                    && catalog.get() != cat {
+                                        catalog.set(cat);
+                                    }
+                                if let Some(nt) = with_phone(&slot, |p| p.new_thread()).await {
+                                    // El daemon creó el hilo pedido desde «New thread»: abrirlo.
+                                    if thread_open.get().as_deref() == Some("_new")
+                                        && let Some(id) = nt.result.as_deref().and_then(|r| r.strip_prefix("thread ")) {
+                                            thread_open.set(Some(id.to_string()));
+                                        }
+                                    if new_thread.get().as_ref() != Some(&nt) {
+                                        new_thread.set(Some(nt));
+                                    }
                                 }
                                 if keys.get() != ks {
                                     keys.set(ks);
@@ -125,7 +194,9 @@ pub fn App() -> impl IntoElement {
                                     0 => "in sync".to_string(),
                                     n => format!("sending {n}…"),
                                 });
-                                approvals.set(list);
+                                if approvals.get() != list {
+                                    approvals.set(list);
+                                }
                             }
                             Some(Err(e)) => {
                                 sync_line.set("offline".into());
@@ -146,7 +217,17 @@ pub fn App() -> impl IntoElement {
                     None => {}
                 }
                 tick.set(tick.get().wrapping_add(1));
-                timer(Duration::from_secs(2)).await;
+                // Cada 2 s; cada medio segundo mientras algo de este teléfono espera respuesta, y enseguida
+                // al mandar algo (`kick`).
+                let busy = threads.get().iter().any(|t| t.waiting) || incidents.get().iter().any(|i| i.waiting) || approvals.get().iter().any(|a| a.pending) || pending_thread.get().is_some();
+                let steps = if busy { 2 } else { 8 };
+                for _ in 0..steps {
+                    if kick.get() {
+                        break;
+                    }
+                    timer(Duration::from_millis(250)).await;
+                }
+                kick.set(false);
             }
         });
     }
@@ -250,11 +331,18 @@ pub fn App() -> impl IntoElement {
                 if let Some(Err(e)) = with_phone(&slot, move |p| p.decide(&job, approve, confirm)).await {
                     status.set(format!("Couldn't decide: {e}"));
                 }
+                kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.approvals()).await {
                     approvals.set(list);
                 }
             });
         }
+    };
+
+    // La misma decisión, para las tarjetas de aprobación dentro de los hilos.
+    let decide_rc: chat::Decide = {
+        let d = decide.clone();
+        std::rc::Rc::new(d)
     };
 
     // Un pedido sobre un incidente: sale firmado en el próximo sync; el daemon decide.
@@ -266,6 +354,7 @@ pub fn App() -> impl IntoElement {
                 if let Some(Err(e)) = with_phone(&slot, move |p| p.request(&id, request, &arg)).await {
                     status.set(format!("Couldn't send: {e}"));
                 }
+                kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.incidents()).await {
                     incidents.set(list);
                 }
@@ -278,14 +367,163 @@ pub fn App() -> impl IntoElement {
         let slot = slot.clone();
         move |id: String, text: String| {
             let slot = slot.clone();
-            spawn(async move {
-                if let Some(Err(e)) = with_phone(&slot, move |p| p.thread_send(&id, &text)).await {
+            // Los adjuntos ya subidos van con el mensaje; el campo queda vacío.
+            let files: Vec<sync::Attachment> = thread_files
+                .get()
+                .into_iter()
+                .filter_map(|f| match f.uploaded {
+                    Some(Ok(id)) => Some(sync::Attachment { id, name: f.name, mime: f.mime, kind: f.kind, seconds: f.seconds }),
+                    _ => None,
+                })
+                .collect();
+            thread_files.set(vec![]);
+            app_owner.run(|| spawn(async move {
+                if let Some(Err(e)) = with_phone(&slot, move |p| p.thread_send_with(&id, &text, &files)).await {
                     status.set(format!("Couldn't send: {e}"));
                 }
+                kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.threads()).await {
                     threads.set(list);
                 }
+            }));
+        }
+    };
+
+    // Adjuntar: cada archivo se cifra para la Mac y sube enseguida; el mensaje lleva los ya subidos.
+    let next_local = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let add_file = {
+        let slot = slot.clone();
+        let next_local = next_local.clone();
+        move |bytes: Vec<u8>, name: String, mime: String, kind: &'static str, seconds: Option<f64>, then: Option<Box<dyn FnOnce()>>| {
+            let local = next_local.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut list = thread_files.get();
+            list.push(chat::PendingFile { local, name, mime, kind: kind.into(), seconds, uploaded: None });
+            thread_files.set(list);
+            let slot = slot.clone();
+            spawn(async move {
+                let res = with_phone(&slot, move |p| p.upload(&bytes)).await.unwrap_or_else(|| Err("not paired".into()));
+                let ok = res.is_ok();
+                thread_files.set(thread_files.get().into_iter().map(|mut f| {
+                    if f.local == local {
+                        f.uploaded = Some(res.clone());
+                    }
+                    f
+                }).collect());
+                if ok
+                    && let Some(then) = then {
+                        then();
+                    }
             });
+        }
+    };
+    let composer = {
+        let add_photo = add_file.clone();
+        let add_voice = add_file.clone();
+        let send_voice = send_thread.clone();
+        chat::Composer {
+            files: thread_files,
+            recording,
+            menu: attach_menu,
+            approvals,
+            decide: decide_rc.clone(),
+            reply: thread_reply,
+            catalog,
+            photo: std::rc::Rc::new(move || {
+                let add = add_photo.clone();
+                app_owner.run(|| spawn(async move {
+                    match blocking(scan::start_photo).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return status.set(e),
+                        Err(_) => return,
+                    }
+                    for _ in 0..240 {
+                        timer(Duration::from_secs(1)).await;
+                        match blocking(scan::poll_photo).await {
+                            Ok(scan::PhotoPoll::Waiting) => continue,
+                            Ok(scan::PhotoPoll::Done(bytes)) => {
+                                match blocking(move || scan::shrink_photo(&bytes)).await {
+                                    Ok(Ok(jpeg)) => add(jpeg, format!("photo-{}.jpg", sync::now_ms() / 1000 % 100_000), "image/jpeg".into(), "image", None, None),
+                                    Ok(Err(e)) => status.set(e),
+                                    Err(_) => {}
+                                }
+                                return;
+                            }
+                            Ok(scan::PhotoPoll::Failed(e)) => return status.set(e),
+                            Err(_) => return,
+                        }
+                    }
+                }));
+            }),
+            mic: std::rc::Rc::new(move || {
+                if audio::permission() != audio::Permission::Granted {
+                    if let Err(e) = audio::request_permission() {
+                        status.set(e);
+                    }
+                    status.set("Allow the microphone for Condx, then tap the microphone again.".into());
+                    return;
+                }
+                if let Err(e) = audio::start() {
+                    return status.set(e);
+                }
+                status.set(String::new());
+                recording.set(Some(0.0));
+                // El reloj de la grabación (y el corte a los 3 minutos).
+                app_owner.run(|| spawn(async move {
+                    while recording.get().is_some() {
+                        timer(Duration::from_millis(250)).await;
+                        match audio::elapsed() {
+                            Some(s) if s >= audio::MAX_SECONDS => {
+                                recording.set(Some(s));
+                                break;
+                            }
+                            Some(s) => recording.set(Some(s)),
+                            None => break,
+                        }
+                    }
+                }));
+            }),
+            stop: std::rc::Rc::new(move |send: bool| {
+                recording.set(None);
+                if !send {
+                    audio::cancel();
+                    return;
+                }
+                let add = add_voice.clone();
+                let send_voice = send_voice.clone();
+                app_owner.run(|| spawn(async move {
+                    match blocking(audio::stop).await {
+                        Ok(Ok(rec)) => {
+                            // La nota de voz se manda sola al terminar de subir (como en WhatsApp).
+                            let then: Box<dyn FnOnce()> = Box::new(move || {
+                                if let Some(id) = thread_open.get() {
+                                    let text = thread_text.get();
+                                    thread_text.set(String::new());
+                                    send_voice(id, text);
+                                }
+                            });
+                            add(rec.bytes, "voice.m4a".into(), "audio/mp4".into(), "audio", Some(rec.seconds), Some(then));
+                        }
+                        Ok(Err(e)) => status.set(e),
+                        Err(_) => {}
+                    }
+                }));
+            }),
+        }
+    };
+
+    // El hilo de un incidente: el del agente que ya trabajó en él, o el que abre el daemon.
+    let open_incident_thread = {
+        let ask = ask.clone();
+        move |id: String, run: Option<String>| match run {
+            Some(r) => {
+                thread_text.set(String::new());
+                thread_open.set(Some(r));
+                tab.set("threads");
+            }
+            None => {
+                pending_thread.set(Some(id.clone()));
+                ask(id, "thread", String::new());
+            }
         }
     };
 
@@ -322,25 +560,33 @@ pub fn App() -> impl IntoElement {
             (Some(_), false, Some("needs-mac"), _) => (Health::Warn, "Waiting for Touch ID on the Mac".to_string()),
             (Some(_), false, Some(r), _) => (Health::Bad, format!("The Mac didn't apply it: {}", r.trim_start_matches("rejected: "))),
             (Some(d), false, None, _) => (Health::Unknown, format!("You chose {d} · the Mac checks it")),
-            (None, _, _, "waiting-approval") => (Health::Warn, format!("Needs your approval · {}", if prod { "production: Touch ID on the Mac" } else { item.level.as_str() })),
+            (None, _, _, "waiting-approval") => (Health::Warn, if prod { "Production: Touch ID on the Mac".to_string() } else { format!("Needs your approval · {}", item.level) }),
             (None, _, _, s) => (Health::Unknown, format!("Done: {s}")),
         };
         let (requested_by, recipe, created_at) = (item.requested_by.clone(), item.recipe.clone(), item.created_at);
         let summary = move || {
             tick.get();
-            format!("requested by {requested_by}{} · recipe {recipe}", if created_at > 0 { format!(" {}", theme::ago(created_at)) } else { String::new() })
+            format!("{recipe} · by {requested_by}{}", if created_at > 0 { format!(" · {}", theme::ago(created_at)) } else { String::new() })
         };
-        card()
+        view()
+            .gap(px(6.0))
+            .px_3()
+            .py(px(10.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(c(tokens::CARD_BORDER))
+            .bg(c(tokens::CARD))
             .child(
                 view()
                     .flex_row()
                     .gap_2()
                     .items_center()
-                    .child(view().flex_1().child(text(format!("{} · {}", item.title, item.env)).text_size(px(14.0)).text_color(c(tokens::FG))))
+                    .child(theme::dot(health))
+                    .child(view().flex_1().child(text(format!("{} · {}", item.title, item.env)).number_of_lines(1u32).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
                     .child(kind_tag(&item.env_kind)),
             )
-            .child(text(summary).text_size(px(12.5)).text_color(c(tokens::MUTED)))
-            .child(status_tag(health, state))
+            .child(text(summary).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::MUTED)))
+            .child(text(state).text_size(px(12.0)).text_color(c(if health == Health::Warn { tokens::WARNING } else { tokens::MUTED })))
             .child(match (waiting, typed && !prod) {
                 // «typed»: en la Mac se escribe el nombre del entorno; aquí se desliza hasta el final
                 // (igual de deliberado) y la decisión lleva el nombre que el daemon compara.
@@ -349,7 +595,7 @@ pub fn App() -> impl IntoElement {
                         .gap_2()
                         .pt_1()
                         .child(theme::slide_to_confirm("Slide to approve", move || d1(job_a.clone(), true, Some(env.clone()))))
-                        .child(view().flex_row().child(theme::button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None))))
+                        .child(view().flex_row().justify_end().child(theme::small_button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None))))
                         .into_element(),
                 ),
                 (true, false) => Some(
@@ -357,15 +603,17 @@ pub fn App() -> impl IntoElement {
                         .flex_row()
                         .gap_2()
                         .pt_1()
-                        .child(theme::button(if prod { "Propose" } else { "Approve" }, Variant::Primary, move || d1(job_a.clone(), true, None)))
-                        .child(theme::button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None)))
+                        .justify_end()
+                        .child(theme::small_button("Reject", Variant::Danger, move || d2(job_r.clone(), false, None)))
+                        .child(theme::small_button(if prod { "Propose" } else { "Approve" }, Variant::Primary, move || d1(job_a.clone(), true, None)))
                         .into_element(),
                 ),
                 (false, _) => None,
             })
     };
 
-    // Una tarjeta de incidente, con lo que hizo el agente y lo que se puede pedir.
+    // Un incidente: una fila compacta (estado, título, origen, cuántas veces, cuándo) que se abre al
+    // tocarla con el error, lo que hizo el agente y las acciones (las de menos uso en «⋯»).
     let incident_row = move |i: ReadSignal<Incident>, _ix: ReadSignal<usize>| {
         let inc = i.get();
         let agent = inc.agent.clone();
@@ -375,121 +623,188 @@ pub fn App() -> impl IntoElement {
         let fix = agent["fix"].clone();
         let fix_ready = fix["changes"] == true && fix["discarded"] != true && fix["commit"].is_string();
         let is_expanded = expanded.get().contains(&inc.id);
-        let mut k = card().child(
-            view()
-                .flex_row()
-                .gap_2()
-                .items_center()
-                .child(view().flex_1().child(text(inc.title.clone()).text_size(px(14.0)).text_color(c(tokens::FG))))
-                .child(kind_tag(&inc.source)),
-        );
-        let when = theme::ago(inc.last_seen);
-        let meta = [(!inc.env.is_empty()).then(|| format!("on {}", inc.env)), (inc.count > 1).then(|| format!("{} times", inc.count)), Some(when), (inc.status == "ignored").then(|| "ignored".to_string()), (inc.status == "resolved").then(|| "resolved".to_string())];
-        k = k.child(muted(meta.into_iter().flatten().collect::<Vec<_>>().join(" · ")));
-        if !inc.error.is_empty() {
-            let first: String = inc.error.lines().next().unwrap_or("").chars().take(140).collect();
-            k = k.child(text(first).font_family(theme::MONO_FONT).text_size(px(11.5)).text_color(c(tokens::PROD)));
-        }
-        // El agente: estado, plantilla y su respuesta (la causa; toda al abrirla).
-        if agent.is_object() {
-            let (h, label) = match (agent_status.as_str(), agent["mode"].as_str()) {
-                ("running", Some("fix")) => (Health::Warn, "An agent is preparing a fix".to_string()),
-                ("running", _) => (Health::Warn, "An agent is diagnosing it".to_string()),
-                ("done", Some("fix")) => (Health::Ok, format!("Fix prepared by {}", agent["model"].as_str().unwrap_or("the agent"))),
-                ("done", _) => (Health::Ok, format!("Diagnosis by {}", agent["model"].as_str().unwrap_or("the agent"))),
-                ("stopped", _) => (Health::Unknown, "The agent stopped (limit or budget)".to_string()),
-                ("aborted", _) => (Health::Unknown, "The agent was stopped".to_string()),
-                _ => (Health::Bad, "The agent failed".to_string()),
-            };
-            k = k.child(status_tag(h, label));
-            if let Some(answer) = agent["answer"].as_str().filter(|a| !a.trim().is_empty()) {
-                let shown: String = if is_expanded {
-                    answer.to_string()
-                } else {
-                    answer.split("## ").find(|s| s.starts_with("Cause")).map(|s| s.trim_start_matches("Cause").trim().to_string()).unwrap_or_else(|| answer.chars().take(240).collect())
-                };
-                let mut col = view().gap_1();
-                for line in shown.lines().filter(|l| !l.trim().is_empty()) {
-                    col = col.child(match line.strip_prefix("## ") {
-                        Some(h) => section(h).into_element(),
-                        None => text(line.to_string()).text_size(px(13.0)).text_color(c(tokens::FG)).into_element(),
-                    });
-                }
-                let id = inc.id.clone();
-                k = k.child(col).child(
-                    view()
-                        .flex_row()
-                        .child(text(if is_expanded { "Show less" } else { "Show the whole answer" }).text_size(px(12.5)).text_color(c(tokens::MUTED)))
-                        .on_press(move || {
-                            let mut e = expanded.get();
-                            if let Some(ix) = e.iter().position(|x| x == &id) { e.remove(ix); } else { e.push(id.clone()); }
-                            expanded.set(e);
-                        }),
-                );
-            }
-            if fix_ready {
-                k = k.child(status_tag(Health::Ok, format!("Fix ready on {} · {} files", fix["branch"].as_str().unwrap_or("?"), fix["files"].as_array().map(Vec::len).unwrap_or(0))));
-                if let Some(stat) = fix["stat"].as_str() {
-                    k = k.child(text(stat.to_string()).font_family(theme::MONO_FONT).text_size(px(11.0)).text_color(c(tokens::MUTED)));
-                }
-            }
-        }
-        // Lo que hizo el daemon con el último pedido de este teléfono.
+        let menu = menu_open.get().as_deref() == Some(inc.id.as_str());
+        let health = match inc.status.as_str() {
+            "resolved" => Health::Ok,
+            "ignored" => Health::Unknown,
+            _ => Health::Bad,
+        };
+        let agent_line = agent.is_object().then(|| match (agent_status.as_str(), agent["mode"].as_str()) {
+            ("running", Some("fix")) => (Health::Warn, "Preparing a fix…".to_string()),
+            ("running", _) => (Health::Warn, "Diagnosing…".to_string()),
+            ("done", Some("fix")) if fix_ready => (Health::Ok, "Fix ready".to_string()),
+            ("done", Some("fix")) => (Health::Ok, "Fix attempt done".to_string()),
+            ("done", _) => (Health::Ok, "Diagnosis ready".to_string()),
+            ("stopped", _) => (Health::Unknown, "Agent stopped (limit or budget)".to_string()),
+            ("aborted", _) => (Health::Unknown, "Agent stopped".to_string()),
+            _ => (Health::Bad, "Agent failed".to_string()),
+        });
+        let meta = [Some(inc.source.replace('-', " ")), (!inc.env.is_empty()).then(|| inc.env.clone()), (inc.count > 1).then(|| format!("{}×", inc.count)), (inc.status != "open").then(|| inc.status.clone())];
+        let id_t = inc.id.clone();
+        let mut k = view()
+            .gap(px(6.0))
+            .px_3()
+            .py(px(10.0))
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(c(tokens::CARD_BORDER))
+            .bg(c(tokens::CARD))
+            .child(
+                view()
+                    .gap(px(4.0))
+                    .on_press(move || {
+                        let mut e = expanded.get();
+                        if let Some(ix) = e.iter().position(|x| x == &id_t) {
+                            e.remove(ix);
+                        } else {
+                            e.push(id_t.clone());
+                        }
+                        expanded.set(e);
+                    })
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .items_center()
+                            .child(theme::dot(health))
+                            .child(view().flex_1().child(text(inc.title.clone()).number_of_lines(if is_expanded { 3u32 } else { 1u32 }).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
+                            .child(text(theme::ago(inc.last_seen).trim_end_matches(" ago").to_string()).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .items_center()
+                            .pl(px(15.0))
+                            .child(text(meta.into_iter().flatten().collect::<Vec<_>>().join(" · ")).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::MUTED)))
+                            .child(match &agent_line {
+                                Some((h, l)) => view().flex_row().gap(px(5.0)).items_center().child(text("·").text_size(px(12.0)).text_color(c(tokens::SUBTLE))).child(theme::dot(*h)).child(text(l.clone()).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::MUTED))).into_element(),
+                                None => view().into_element(),
+                            }),
+                    ),
+            );
+        // Lo que hizo el daemon con el último pedido de este teléfono (se ve aunque esté cerrada).
         if inc.waiting {
-            k = k.child(status_tag(Health::Warn, "Sending your request…"));
-        } else if let Some(r) = &inc.result {
-            k = k.child(status_tag(if r.starts_with("rejected") { Health::Bad } else { Health::Ok }, r.clone()));
+            k = k.child(view().pl(px(15.0)).child(status_tag(Health::Unknown, "Sending your request…")));
+        } else if let Some(r) = inc.result.as_ref().filter(|r| !r.starts_with("thread ")) {
+            k = k.child(view().pl(px(15.0)).child(status_tag(if r.starts_with("rejected") { Health::Bad } else { Health::Ok }, r.clone())));
         }
-        if open && !inc.waiting && !running {
-            let (a1, a2, a3, a4) = (ask.clone(), ask.clone(), ask.clone(), ask.clone());
-            let (id1, id2, id3, id4) = (inc.id.clone(), inc.id.clone(), inc.id.clone(), inc.id.clone());
-            k = k
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .pt_1()
-                        .child(theme::button(if agent.is_object() { "Diagnose again" } else { "Diagnose" }, Variant::Primary, move || a1(id1.clone(), "diagnose", String::new())))
-                        .child(theme::button("Prepare a fix", Variant::Outline, move || a2(id2.clone(), "fix", String::new()))),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .child(theme::button("Ignore", Variant::Outline, move || a3(id3.clone(), "ignore", String::new())))
-                        .child(theme::button("Resolve", Variant::Outline, move || a4(id4.clone(), "resolve", String::new()))),
-                );
-            // Desplegar el arreglo: deslizar (el flujo pide sus propias aprobaciones).
-            if fix_ready {
-                for (wid, name) in inc.workflows.iter().take(3) {
-                    let (a, id, wid) = (ask.clone(), inc.id.clone(), wid.clone());
-                    k = k.child(theme::slide_to_confirm(format!("Slide to run “{name}”"), move || a(id.clone(), "deploy", wid.clone())));
-                }
-                if inc.workflows.is_empty() {
-                    k = k.child(muted("Turn on a workflow on the Mac to deploy fixes from here."));
-                }
-                let (a, id) = (ask.clone(), inc.id.clone());
-                k = k.child(view().flex_row().child(theme::button("Discard the fix", Variant::Danger, move || a(id.clone(), "discard", String::new()))));
-            }
+        if !is_expanded {
+            return k;
         }
-        // Escribirle al agente (sigue la conversación o la redirige si está trabajando).
-        if agent.is_object() && open && !inc.waiting {
-            let (a, id) = (ask.clone(), inc.id.clone());
+        if !inc.error.is_empty() {
             k = k.child(
                 view()
-                    .flex_row()
-                    .gap_2()
-                    .items_center()
-                    .child(view().flex_1().child(field("Write to the agent…", agent_text)))
-                    .child(view().w(px(84.0)).flex_row().child(theme::button("Send", Variant::Outline, move || {
-                        let text = agent_text.get().trim().to_string();
-                        if text.is_empty() {
-                            return;
-                        }
-                        agent_text.set(String::new());
-                        a(id.clone(), "message", text);
-                    }))),
+                    .px_2()
+                    .py(px(6.0))
+                    .rounded(px(6.0))
+                    .bg(c(tokens::HOVER))
+                    .child(text(inc.error.lines().take(6).collect::<Vec<_>>().join("\n")).number_of_lines(6u32).font_family(theme::MONO_FONT).text_size(px(11.5)).line_height(px(16.0)).text_color(c(tokens::PROD))),
             );
+        }
+        // La respuesta del agente: la causa; toda al pedirla.
+        if let Some(answer) = agent["answer"].as_str().filter(|a| !a.trim().is_empty()) {
+            let whole = answer_open.get().contains(&inc.id);
+            let shown: String = if whole {
+                answer.to_string()
+            } else {
+                answer.split("## ").find(|s| s.starts_with("Cause")).map(|s| s.trim_start_matches("Cause").trim().to_string()).unwrap_or_else(|| answer.chars().take(240).collect())
+            };
+            let col = md::render(&shown, 13.0);
+            let id = inc.id.clone();
+            k = k.child(col).child(text(if whole { "Show less" } else { "Show the whole answer" }).text_size(px(12.0)).text_color(c(tokens::MUTED)).on_press(move || {
+                let mut e = answer_open.get();
+                if let Some(ix) = e.iter().position(|x| x == &id) {
+                    e.remove(ix);
+                } else {
+                    e.push(id.clone());
+                }
+                answer_open.set(e);
+            }));
+        }
+        if fix_ready {
+            k = k.child(status_tag(Health::Ok, {
+                let n = fix["files"].as_array().map(Vec::len).unwrap_or(0);
+                format!("Fix on {} · {n} file{}", fix["branch"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" })
+            }));
+        }
+        // Acciones: las de siempre como botones chicos; las demás en «⋯».
+        let (open_thread, id_th) = (open_incident_thread.clone(), inc.id.clone());
+        let agent_run = agent["runId"].as_str().map(str::to_string);
+        let mut actions = view().flex_row().gap_2().pt_1().flex_wrap().items_center();
+        if open && !inc.waiting && !running {
+            let (a1, a2, id1, id2) = (ask.clone(), ask.clone(), inc.id.clone(), inc.id.clone());
+            actions = actions
+                .child(theme::small_button(if agent.is_object() { "Diagnose again" } else { "Diagnose" }, Variant::Primary, move || a1(id1.clone(), "diagnose", String::new())))
+                .child(theme::small_button("Fix", Variant::Outline, move || a2(id2.clone(), "fix", String::new())));
+        }
+        actions = actions.child(theme::small_button("Thread", Variant::Outline, move || open_thread(id_th.clone(), agent_run.clone())));
+        let id_m = inc.id.clone();
+        actions = actions.child(view().flex_1()).child(theme::small_button("⋯", Variant::Outline, move || menu_open.set(if menu_open.get().as_deref() == Some(id_m.as_str()) { None } else { Some(id_m.clone()) })));
+        k = k.child(actions);
+        if menu {
+            let mut m = view().rounded(px(8.0)).border_1().border_color(c(tokens::CARD_BORDER)).overflow_hidden();
+            let mut entries: Vec<(&'static str, &'static str, bool)> = Vec::new();
+            if open && !inc.waiting {
+                entries.push(("Ignore", "ignore", false));
+                entries.push(("Resolve", "resolve", false));
+            }
+            if fix_ready {
+                entries.push(("Discard the fix", "discard", true));
+            }
+            // Desplegar el arreglo con un flujo encendido: se elige aquí y se confirma deslizando.
+            let deploys: Vec<(String, String)> = if fix_ready && open && !inc.waiting && !running { inc.workflows.iter().take(4).cloned().collect() } else { vec![] };
+            if entries.is_empty() && deploys.is_empty() {
+                m = m.child(view().px_3().py_2().child(muted("Nothing else to do here.")));
+            }
+            let n = entries.len();
+            for (ix, (label, req, danger)) in entries.into_iter().enumerate() {
+                let (a, id) = (ask.clone(), inc.id.clone());
+                let mut item = view()
+                    .px_3()
+                    .h(px(40.0))
+                    .justify_center()
+                    .active(|s| s.bg(c(tokens::ACTIVE)))
+                    .on_press(move || {
+                        menu_open.set(None);
+                        a(id.clone(), req, String::new());
+                    })
+                    .child(text(label).text_size(px(13.5)).text_color(c(if danger { tokens::DANGER } else { tokens::FG })));
+                if ix + 1 < n {
+                    item = item.border_b_1().border_color(c(tokens::CARD_BORDER));
+                }
+                m = m.child(item);
+            }
+            for (wid, name) in deploys {
+                let pick = (inc.id.clone(), wid, name.clone());
+                m = m.child(
+                    view()
+                        .px_3()
+                        .h(px(40.0))
+                        .justify_center()
+                        .border_t_1()
+                        .border_color(c(tokens::CARD_BORDER))
+                        .active(|s| s.bg(c(tokens::ACTIVE)))
+                        .on_press(move || {
+                            menu_open.set(None);
+                            deploy_pick.set(Some(pick.clone()));
+                        })
+                        .child(text(format!("Deploy the fix with “{name}”")).number_of_lines(1u32).text_size(px(13.5)).text_color(c(tokens::FG))),
+                );
+            }
+            k = k.child(m);
+        }
+        // Desplegar: el flujo elegido en «⋯», confirmado deslizando (el flujo pide sus propias aprobaciones).
+        if let Some((_, wid, name)) = deploy_pick.get().filter(|d| d.0 == inc.id) {
+            let (a, id) = (ask.clone(), inc.id.clone());
+            k = k
+                .child(theme::slide_to_confirm(format!("Slide to run “{name}”"), move || {
+                    deploy_pick.set(None);
+                    a(id.clone(), "deploy", wid.clone());
+                }))
+                .child(view().flex_row().justify_end().child(theme::small_button("Cancel", Variant::Outline, move || deploy_pick.set(None))));
+        } else if fix_ready && open && inc.workflows.is_empty() {
+            k = k.child(muted("Turn on a workflow on the Mac to deploy fixes from here."));
         }
         k
     };
@@ -580,6 +895,8 @@ pub fn App() -> impl IntoElement {
             safe_area_view().flex_1().child(
                 view()
                     .flex_1()
+                    // El código a pantalla completa, encima de todo (`md::fullscreen`).
+                    .child(md::fullscreen())
                     .child(top_bar())
                     .child(
                         view()
@@ -612,21 +929,17 @@ pub fn App() -> impl IntoElement {
                                         view()
                                             .p_4()
                                             .gap_3()
-                                            // Pestañas: aprobaciones e incidentes.
+                                            // Pestañas: un control segmentado compacto, con lo que espera en cada una.
                                             .child(dynamic(move || {
                                                 let open = incidents.get().iter().filter(|i| i.status == "open").count();
-                                                let incidents_label = if open > 0 { format!("Incidents · {open}") } else { "Incidents".to_string() };
-                                                view()
-                                                    .flex_row()
-                                                    .gap_2()
-                                                    .child(theme::button("Approvals", if tab.get() == "approvals" { Variant::Primary } else { Variant::Outline }, move || tab.set("approvals")))
-                                                    .child(theme::button(incidents_label, if tab.get() == "incidents" { Variant::Primary } else { Variant::Outline }, move || tab.set("incidents")))
-                                                    .child({
-                                                        let busy = threads.get().iter().filter(|t| t.waiting_answer || matches!(t.status.as_str(), "running" | "waiting-approval" | "waiting-answer")).count();
-                                                        let label = if busy > 0 { format!("Threads · {busy}") } else { "Threads".to_string() };
-                                                        theme::button(label, if tab.get() == "threads" { Variant::Primary } else { Variant::Outline }, move || tab.set("threads"))
-                                                    })
-                                                    .into_element()
+                                                let busy = threads.get().iter().filter(|t| t.waiting_answer || t.status == "waiting-approval").count();
+                                                let t = tab.get();
+                                                theme::segmented(vec![
+                                                    ("Approvals", waiting_count.get(), t == "approvals", Box::new(move || tab.set("approvals"))),
+                                                    ("Incidents", open, t == "incidents", Box::new(move || tab.set("incidents"))),
+                                                    ("Threads", busy, t == "threads", Box::new(move || tab.set("threads"))),
+                                                ])
+                                                .into_element()
                                             }))
                                             .child(dynamic(move || {
                                                 if tab.get() != "approvals" {
@@ -656,8 +969,13 @@ pub fn App() -> impl IntoElement {
                                                     return card().child(status_tag(Health::Ok, "No incidents. Everything Condx watches is fine.")).into_element();
                                                 }
                                                 view().gap_3().child(each(
-                                                    move || incidents.get(),
-                                                    |i: &Incident| format!("{}|{}|{}|{:?}|{}|{}|{}", i.id, i.status, i.count, i.result, i.waiting, i.agent, i.workflows.len()),
+                                                    move || {
+                                                        // También al abrir o cerrar algo, para que se rearmen las llaves.
+                                                        let _ = (expanded.get(), menu_open.get(), answer_open.get(), deploy_pick.get());
+                                                        incidents.get()
+                                                    },
+                                                    // Lo abierto (la tarjeta, su menú, la respuesta entera) va en la llave: la fila se rearma al cambiar.
+                                                    move |i: &Incident| format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}", i.id, i.status, i.count, i.result, i.waiting, i.agent, i.workflows.len(), expanded.get().contains(&i.id), menu_open.get().as_deref() == Some(i.id.as_str()), answer_open.get().contains(&i.id), deploy_pick.get().is_some_and(|d| d.0 == i.id)),
                                                     incident_row.clone(),
                                                 )).into_element()
                                             }}))
@@ -666,7 +984,11 @@ pub fn App() -> impl IntoElement {
                                                     if tab.get() != "threads" {
                                                         return view().hidden().into_element();
                                                     }
-                                                    if thread_open.get().is_some() { view().hidden().into_element() } else { chat::list(threads.get(), thread_open, thread_text).into_element() }
+                                                    if thread_open.get().is_some() {
+                                                        view().hidden().into_element()
+                                                    } else {
+                                                        chat::list(threads.get(), thread_open, thread_text).into_element()
+                                                    }
                                                 }
                                             }))
                                             // Este teléfono: abajo de aprobaciones e incidentes (en los hilos, el chat ocupa la pantalla).
@@ -677,7 +999,7 @@ pub fn App() -> impl IntoElement {
                                                     return view().hidden().into_element();
                                                 }
                                                 view().gap_3().pt_2().child(section("This phone")).child(
-                                                card()
+                                                card().rounded(px(10.0))
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
                                                     .child(kv("Stored in", text(secure::backend()).text_size(px(13.0))))
                                                     .child(dynamic(move || {
@@ -697,18 +1019,44 @@ pub fn App() -> impl IntoElement {
                                                         };
                                                         kv("Keys", content).into_element()
                                                     }))
-                                                    .child(view().flex_row().pt_1().child(theme::button("Unpair this phone", Variant::Outline, unpair.clone()))),
+                                                    .child(view().flex_row().justify_end().pt_1().child(theme::small_button("Unpair this phone", Variant::Outline, unpair.clone()))),
                                             
                                                 ).into_element()
                                             }})),
                                     ))
+                                    // Hilo nuevo: el botón flotante abajo a la derecha (en la lista de hilos).
+                                    .child(dynamic(move || {
+                                        if tab.get() != "threads" || thread_open.get().is_some() {
+                                            return view().into_element();
+                                        }
+                                        view()
+                                            .absolute()
+                                            .right(px(20.0))
+                                            .bottom(px(24.0))
+                                            .w(px(56.0))
+                                            .h(px(56.0))
+                                            .rounded(px(28.0))
+                                            .items_center()
+                                            .justify_center()
+                                            .bg(c(tokens::ACCENT))
+                                            .shadow_md()
+                                            .active(|s| s.opacity(0.85))
+                                            .on_press(move || {
+                                                thread_text.set(String::new());
+                                                thread_files.set(vec![]);
+                                                thread_open.set(Some("_new".into()));
+                                            })
+                                            .child(theme::icon(theme::PLUS, tokens::ON_ACCENT, 26.0))
+                                            .into_element()
+                                    }))
                                     // Un hilo abierto: el chat a pantalla completa, encima.
                                     .child(dynamic({
                                         let send_thread = send_thread.clone();
+                                        let composer = composer.clone();
                                         move || {
-                                            let t = (tab.get() == "threads").then(|| thread_open.get()).flatten().and_then(|id| threads.get().into_iter().find(|t| t.id == id));
+                                            let t = (tab.get() == "threads").then(|| thread_open.get()).flatten().and_then(|id| if id == "_new" { Some(new_thread.get().unwrap_or_else(|| Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, result: None, waiting: false, sending: None })) } else { threads.get().into_iter().find(|t| t.id == id) });
                                             match t {
-                                                Some(t) => view().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).child(chat::screen(t, thread_open, thread_text, send_thread.clone())).into_element(),
+                                                Some(t) => view().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).child(chat::screen(t, thread_open, thread_text, send_thread.clone(), composer.clone())).into_element(),
                                                 None => view().into_element(),
                                             }
                                         }

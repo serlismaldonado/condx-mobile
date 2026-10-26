@@ -295,6 +295,32 @@ mod platform {
         }
     }
 
+    /// Una foto para adjuntar a un hilo: la misma cámara, sin quedar como escaneo pendiente.
+    pub fn start_photo() -> Result<(), String> {
+        start()?;
+        if let Some(f) = pending_file() {
+            let _ = std::fs::remove_file(f);
+        }
+        Ok(())
+    }
+
+    /// Los bytes de la foto cuando la cámara terminó de escribirla (y borra la fila).
+    pub fn poll_photo() -> super::PhotoPoll {
+        let Some((uri, last)) = PENDING.lock().unwrap().clone() else { return super::PhotoPoll::Failed("no photo in progress".into()) };
+        let bytes = match read(&uri) {
+            Ok(b) => b,
+            Err(e) => return super::PhotoPoll::Failed(e),
+        };
+        if bytes.is_empty() || bytes.len() != last {
+            if let Some(p) = PENDING.lock().unwrap().as_mut() {
+                p.1 = bytes.len();
+            }
+            return super::PhotoPoll::Waiting;
+        }
+        cancel();
+        super::PhotoPoll::Done(bytes)
+    }
+
     /// Borra la fila (con o sin foto).
     pub fn cancel() {
         let _ = load();
@@ -331,9 +357,33 @@ mod platform {
     pub fn open_camera_app() -> Result<(), String> {
         Err("no camera here".into())
     }
+    pub fn start_photo() -> Result<(), String> {
+        Err("there's no camera here".into())
+    }
+    pub fn poll_photo() -> super::PhotoPoll {
+        super::PhotoPoll::Failed("there's no camera here".into())
+    }
 }
 
-pub use platform::{cancel, clipboard, open_camera_app, pending, poll, start};
+pub use platform::{cancel, clipboard, open_camera_app, pending, poll, poll_photo, start, start_photo};
+
+/// En qué va una foto para adjuntar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PhotoPoll {
+    Waiting,
+    Done(Vec<u8>),
+    Failed(String),
+}
+
+/// Una foto del teléfono (12 MP o más) reducida a 1600 px de lado y JPEG: lo que un modelo necesita
+/// para verla, y unas decenas de KB en vez de varios MB.
+pub fn shrink_photo(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("couldn't read the photo: {e}"))?;
+    let img = if img.width().max(img.height()) > 1600 { img.resize(1600, 1600, image::imageops::FilterType::Triangle) } else { img };
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 80).encode_image(&img.to_rgb8()).map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
+}
 
 #[cfg(test)]
 mod tests {

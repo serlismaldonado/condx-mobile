@@ -79,6 +79,32 @@ pub struct Thread {
     pub waiting_answer: bool,
     pub result: Option<String>,
     pub waiting: bool,
+    /// Lo que este teléfono mandó y todavía no contestó el daemon (se muestra al instante).
+    pub sending: Option<String>,
+}
+
+/// Un adjunto subido: lo que el mensaje dice de él (el daemon lo baja con `id`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Attachment {
+    pub id: String,
+    pub name: String,
+    pub mime: String,
+    /// `image`, `audio` o `file`.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+}
+
+/// Dónde responden las rutas HTTP del deployment (como `site_url` del daemon).
+pub fn site_url(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    if let Some(base) = url.strip_suffix(".convex.cloud") {
+        format!("{base}.convex.site")
+    } else if let Some((host, port)) = url.strip_prefix("http://").and_then(|r| r.rsplit_once(':')).filter(|(h, _)| *h == "127.0.0.1" || *h == "localhost" || *h == "10.0.2.2") {
+        format!("http://{host}:{}", port.parse::<u16>().map(|p| p + 1).unwrap_or(3211))
+    } else {
+        url.to_string()
+    }
 }
 
 /// Lo que firma el teléfono para escribir en un hilo (mismo texto en el daemon; otro prefijo que el
@@ -233,6 +259,9 @@ pub struct Phone {
     keys_scope: String,
     threads_scope: String,
     age: Option<age::x25519::Identity>,
+    /// El deployment y el token del teléfono: para subir adjuntos a `/files`.
+    url: String,
+    token: String,
 }
 
 pub type Shared = Arc<Mutex<Phone>>;
@@ -257,7 +286,7 @@ impl Phone {
         engine.enable_scope(&threads_scope, None).map_err(|e| e.to_string())?;
         let age = identity.age.as_deref().and_then(|a| a.parse::<age::x25519::Identity>().ok());
         let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
-        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, age })
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, age, url: identity.url.clone(), token: identity.token.clone() })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
@@ -363,6 +392,8 @@ impl Phone {
             .engine
             .rows(&self.threads_scope)
             .into_iter()
+            // `_mac` y `_new` no son hilos: la llave de la Mac y donde se piden hilos nuevos.
+            .filter(|r| !r.row.id.starts_with('_'))
             .map(|r| {
                 let v = &r.row.values;
                 let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
@@ -379,6 +410,7 @@ impl Phone {
                     waiting_answer: v.get("waitingAnswer").and_then(Value::as_bool).unwrap_or(false),
                     result: v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string),
                     waiting: own && (r.pending || !answered),
+                    sending: v.get("requestArg").and_then(Value::as_str).filter(|_| own && (r.pending || !answered)).map(str::to_string),
                 }
             })
             .collect();
@@ -388,16 +420,75 @@ impl Phone {
 
     /// Escribe en un hilo: sale firmado en el próximo sync; el daemon verifica y decide a quién va.
     pub fn thread_send(&mut self, thread_id: &str, text: &str) -> Result<(), String> {
+        self.thread_send_with(thread_id, text, &[])
+    }
+
+    /// La fila donde se pide un hilo nuevo, como un hilo vacío («New thread»): lo que se mandó desde
+    /// aquí y qué contestó el daemon («thread <id>» con el hilo creado).
+    pub fn new_thread(&self) -> Thread {
+        let mine = hex(self.key.verifying_key().as_bytes());
+        let row = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_new");
+        let (mut waiting, mut result, mut sending) = (false, None, None);
+        if let Some(r) = &row {
+            let v = &r.row.values;
+            let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
+            let request_id = v.get("requestId").and_then(Value::as_str);
+            let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id;
+            waiting = own && (r.pending || !answered);
+            result = v.get("result").and_then(Value::as_str).filter(|_| own && answered).map(str::to_string);
+            sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
+        }
+        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, result, waiting, sending }
+    }
+
+    /// El catálogo de agentes que publica el daemon (fila `_agents`): (id, nombre, marca del proveedor).
+    pub fn catalog(&self) -> Vec<(String, String, String)> {
+        let Some(r) = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_agents") else { return vec![] };
+        let list: Vec<Value> = r.row.values.get("participants").and_then(Value::as_str).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+        list.iter().filter_map(|a| Some((a["id"].as_str()?.to_string(), a["name"].as_str()?.to_string(), a["logo"].as_str().unwrap_or("").to_string()))).collect()
+    }
+
+    /// La llave age de la Mac (la publica el daemon en la fila `_mac` de los hilos).
+    pub fn mac_recipient(&self) -> Option<age::x25519::Recipient> {
+        self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("recipient")?.as_str()?.parse().ok()
+    }
+
+    /// Cifra el archivo para la Mac (la nube no puede leerlo) y lo sube a `/files`; devuelve su id.
+    pub fn upload(&self, bytes: &[u8]) -> Result<String, String> {
+        let mac = self.mac_recipient().ok_or("the Mac hasn't published its key yet: update Condx on the Mac")?;
+        let encryptor = age::Encryptor::with_recipients(std::iter::once(&mac as &dyn age::Recipient)).map_err(|e| e.to_string())?;
+        let mut sealed = vec![];
+        let mut w = encryptor.wrap_output(&mut sealed).map_err(|e| e.to_string())?;
+        std::io::Write::write_all(&mut w, bytes).map_err(|e| e.to_string())?;
+        w.finish().map_err(|e| e.to_string())?;
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(120)).build();
+        let url = format!("{}/files", site_url(&self.url));
+        match agent.post(&url).set("Authorization", &format!("Bearer {}", self.token)).set("Content-Type", "application/octet-stream").send_bytes(&sealed) {
+            Ok(r) => r.into_json::<Value>().map_err(|e| e.to_string())?["id"].as_str().map(str::to_string).ok_or_else(|| "no id from Condx Cloud".into()),
+            Err(ureq::Error::Status(413, _)) => Err("the file is too big (10 MB at most)".into()),
+            Err(ureq::Error::Status(code, r)) => Err(format!("Condx Cloud answered {code}: {}", r.into_string().unwrap_or_default().chars().take(120).collect::<String>())),
+            Err(e) => Err(format!("couldn't upload: {e}")),
+        }
+    }
+
+    /// Un mensaje con adjuntos ya subidos (`upload`): van firmados con el texto («texto␟archivos»).
+    pub fn thread_send_with(&mut self, thread_id: &str, text: &str, files: &[Attachment]) -> Result<(), String> {
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() && files.is_empty() {
             return Err("write something".into());
         }
         let at = now_ms();
         let request_id = random_hex(8);
-        let signature = self.key.sign(thread_message(&self.daemon_id, thread_id, &request_id, at, text).as_bytes());
+        let files_json = (!files.is_empty()).then(|| serde_json::to_string(files).unwrap_or_default());
+        let signed = match &files_json {
+            Some(f) => format!("{text}\u{1f}{f}"),
+            None => text.to_string(),
+        };
+        let signature = self.key.sign(thread_message(&self.daemon_id, thread_id, &request_id, at, &signed).as_bytes());
         let mut set = Values::new();
         set.insert("request".into(), json!("message"));
         set.insert("requestArg".into(), json!(text));
+        set.insert("requestFiles".into(), files_json.map(Value::String).unwrap_or(Value::Null));
         set.insert("requestId".into(), json!(request_id));
         set.insert("requestedAt".into(), json!(at));
         set.insert("deviceKey".into(), json!(hex(self.key.verifying_key().as_bytes())));
