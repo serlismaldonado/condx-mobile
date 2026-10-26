@@ -844,6 +844,8 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                     people.push((name, id, logo, false));
                 }
             }
+            // Hay a quién mencionar (los del hilo o el catálogo; un hilo nuevo todavía no tiene a nadie).
+            let anyone = !people.is_empty();
             for (name, handle, logo, member) in people {
                 chips = chips.child(
                     view()
@@ -886,7 +888,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                 _ => None,
             };
             view()
-                .child(if t.participants.is_empty() { view().into_element() } else { scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(chips).into_element() })
+                .child(if !anyone { view().into_element() } else { scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(chips).into_element() })
                 .child(match delivery {
                     Some((h, label)) => view().px_4().pt_2().child(theme::status_tag(h, label)).into_element(),
                     None => view().into_element(),

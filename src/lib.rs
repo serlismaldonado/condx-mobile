@@ -72,6 +72,8 @@ pub fn App() -> impl IntoElement {
     // Mensajes para la persona (errores, avisos) y el estado de la sincronización (barra superior).
     let status = signal(String::new());
     let sync_line = signal(String::new());
+    // Lo que no salió: cambios esperando y los que la nube rechazó (Ajustes → Este teléfono).
+    let outbox = signal((0usize, Vec::<String>::new(), String::new()));
     let presence = signal(chat::Presence::Mac);
     let waiting_count = signal(0usize);
     // Avanza en cada vuelta del ciclo: los «hace N min» se vuelven a calcular.
@@ -131,6 +133,8 @@ pub fn App() -> impl IntoElement {
     let can_keys = signal(true);
     let fingerprint = signal(String::new());
     let slot: Slot = Arc::new(Mutex::new(None));
+    // Para Ajustes (descartar lo que la nube rechazó).
+    let slot_settings = slot.clone();
     // Vincular: el texto del QR (o solo el código) y la URL del deployment si hace falta.
     let pairing_text = signal(String::new());
     let pairing_url = signal(String::new());
@@ -188,6 +192,9 @@ pub fn App() -> impl IntoElement {
             // Fallas seguidas de la red: una sola (al volver de otra app la red tarda un momento) no
             // marca «Offline».
             let mut failures = 0u32;
+            // Si este teléfono vio esperando su pedido de hilo nuevo (solo entonces se abre el que
+            // creó la Mac; la respuesta de un pedido viejo no).
+            let mut new_was_waiting = false;
             loop {
                 let id = blocking(secure::load).await.ok().and_then(|r| r.ok()).flatten();
                 let Some(id) = id else {
@@ -313,9 +320,14 @@ pub fn App() -> impl IntoElement {
                                     }
                                 if let Some(nt) = with_phone(&slot, |p| p.new_thread()).await {
                                     // El daemon creó el hilo pedido desde «New thread»: abrirlo.
-                                    if thread_open.get().as_deref() == Some("_new")
+                                    if nt.waiting {
+                                        new_was_waiting = true;
+                                    }
+                                    if new_was_waiting
+                                        && thread_open.get().as_deref() == Some("_new")
                                         && let Some(id) = nt.result.as_deref().and_then(|r| r.strip_prefix("thread ")) {
                                             thread_open.set(Some(id.to_string()));
+                                            new_was_waiting = false;
                                         }
                                     if new_thread.get().as_ref() != Some(&nt) {
                                         new_thread.set(Some(nt));
@@ -337,6 +349,10 @@ pub fn App() -> impl IntoElement {
                                 if presence.get() != p {
                                     presence.set(p);
                                 }
+                                if let Some(ob) = with_phone(&slot, |p| (p.pending_changes(), p.recovery(), p.sync_debug())).await
+                                    && outbox.get() != ob {
+                                        outbox.set(ob);
+                                    }
                                 sync_line.set(match (pending, mac_off) {
                                     (0, Some(0)) => "Mac offline".to_string(),
                                     (0, Some(at)) => crate::i18n::tr(format!("Mac offline · {}", theme::ago(at)), format!("Mac apagada · {}", theme::ago(at))),
@@ -1280,6 +1296,7 @@ pub fn App() -> impl IntoElement {
                                             .child(dynamic({
                                                 let unpair = unpair.clone();
                                                 let run_send = run_send.clone();
+                                                let slot_settings = slot_settings.clone();
                                                 move || {
                                                 if tab.get() != "settings" {
                                                     return view().hidden().into_element();
@@ -1327,6 +1344,29 @@ pub fn App() -> impl IntoElement {
                                                 card().rounded(px(10.0))
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
                                                     .child(kv("Stored in", text(secure::backend()).text_size(px(13.0))))
+                                                    .child(dynamic({
+                                                        let slot = slot_settings.clone();
+                                                        move || {
+                                                            let (pending, rejected, debug) = outbox.get();
+                                                            let mut col = view().gap(px(4.0)).child(kv("Sync", text(crate::i18n::tr(format!("{pending} waiting to send · {} rejected", rejected.len()), format!("{pending} por enviar · {} rechazados", rejected.len()))).text_size(px(13.0))));
+                                                            for r in rejected.iter().take(4) {
+                                                                col = col.child(text(r.clone()).number_of_lines(2u32).text_size(px(11.5)).text_color(c(tokens::DANGER)));
+                                                            }
+                                                            if pending > 0 {
+                                                                col = col.child(text(debug).number_of_lines(3u32).text_size(px(11.0)).font_family(theme::MONO_FONT).text_color(c(tokens::SUBTLE)));
+                                                            }
+                                                            if !rejected.is_empty() {
+                                                                let slot = slot.clone();
+                                                                col = col.child(view().flex_row().child(theme::small_button("Discard rejected", Variant::Outline, move || {
+                                                                    let slot = slot.clone();
+                                                                    spawn(async move {
+                                                                        let _ = with_phone(&slot, |p| p.discard_rejected()).await;
+                                                                    });
+                                                                })));
+                                                            }
+                                                            col.into_element()
+                                                        }
+                                                    }))
                                                     .child(dynamic(move || {
                                                         let ks = keys.get();
                                                         let content = if !can_keys.get() {

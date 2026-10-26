@@ -563,7 +563,7 @@ impl Phone {
             sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
             delivered = own && !r.pending && !answered;
         }
-        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false }
+        Thread { id: "_new".into(), title: crate::i18n::t("New thread"), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false }
     }
 
     /// El catálogo de agentes que publica el daemon (fila `_agents`): (id, nombre, marca del proveedor).
@@ -838,6 +838,20 @@ impl Phone {
     /// Lo que no llegó (rechazos y conflictos del servidor), para mostrarlo.
     pub fn recovery(&self) -> Vec<String> {
         self.engine.recovery_items().iter().map(|r| format!("{:?} {}: {}", r.kind, r.group.ops.first().map(|o| o.row_id.as_str()).unwrap_or("?"), r.error.as_ref().map(|e| e.message.as_str()).unwrap_or_else(|| if r.conflicts.is_some() { "conflict" } else { "" }))).collect()
+    }
+
+    /// Descarta los cambios que la nube rechazó (quedan en recuperación) y vuelve a sincronizar.
+    pub fn discard_rejected(&mut self) -> usize {
+        let ids: Vec<String> = self.engine.recovery_items().iter().map(|r| r.group_id.clone()).collect();
+        for id in &ids {
+            let _ = self.engine.discard_recovery(id);
+        }
+        ids.len()
+    }
+
+    /// El estado del motor de sincronización (para ver por qué algo no sale).
+    pub fn sync_debug(&self) -> String {
+        format!("{:?}", self.engine.sync_status())
     }
 
     pub fn pending_changes(&self) -> usize {

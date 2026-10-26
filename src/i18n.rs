@@ -170,6 +170,8 @@ const ES: &[(&str, &str)] = &[
     ("CI running", "CI corriendo"),
     ("No CI", "Sin CI"),
     ("Merging deploys production (the repo's build or Vercel).", "Fusionar despliega producción (el build del repo o Vercel)."),
+    ("Sync", "Sincronización"),
+    ("Discard rejected", "Descartar rechazados"),
     // Avisos.
     ("Install", "Instalar"),
 ];
