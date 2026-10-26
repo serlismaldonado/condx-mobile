@@ -89,7 +89,8 @@ pub fn dot(health: Health) -> impl IntoElement {
 
 /// Estado como punto de color y texto apagado.
 pub fn status_tag(health: Health, label: impl Into<String>) -> impl IntoElement {
-    view().flex_row().gap_2().items_center().child(dot(health)).child(text(label.into()).text_size(px(12.0)).text_color(c(tokens::MUTED)))
+    // El texto se corta a dos líneas (un error largo no se sale de la pantalla).
+    view().flex_row().gap_2().items_center().child(dot(health)).child(view().flex_1().child(text(label.into()).number_of_lines(2u32).text_size(px(12.0)).text_color(c(tokens::MUTED))))
 }
 
 /// El estado de algo en una píldora de su color (punto, texto y borde).
