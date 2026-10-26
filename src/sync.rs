@@ -494,6 +494,11 @@ impl Phone {
         Some((v.get("version")?.as_str()?.to_string(), v.get("versionCode")?.as_i64()?, v.get("url")?.as_str()?.to_string()))
     }
 
+    /// El último latido de la Mac (`aliveAt` en la fila `_mac`, cada 5 min mientras está encendida).
+    pub fn mac_alive_at(&self) -> Option<i64> {
+        self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("aliveAt")?.as_i64()
+    }
+
     /// La llave age de la Mac (la publica el daemon en la fila `_mac` de los hilos).
     pub fn mac_recipient(&self) -> Option<age::x25519::Recipient> {
         self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("recipient")?.as_str()?.parse().ok()

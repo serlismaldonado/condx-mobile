@@ -52,6 +52,9 @@ async fn with_phone<R: Send + 'static>(slot: &Slot, f: impl FnOnce(&mut Phone) -
     blocking(move || slot.lock().ok()?.as_mut().map(f)).await.ok().flatten()
 }
 
+/// Sin latido de la Mac en este rato, se la da por apagada (late cada 5 min).
+const MAC_OFFLINE_MS: i64 = 12 * 60_000;
+
 #[component]
 pub fn App() -> impl IntoElement {
     let screen = signal(Screen::Loading);
@@ -78,6 +81,8 @@ pub fn App() -> impl IntoElement {
     let kick = signal(false);
     // El flujo elegido en «⋯» para desplegar un arreglo: (incidente, flujo, nombre); se confirma deslizando.
     let deploy_pick = signal(Option::<(String, String, String)>::None);
+    // Desplegar sin PR (`<flujo>|direct`): por defecto el daemon abre el PR antes.
+    let deploy_direct = signal(false);
     // Hilos (F6): las corridas de los flujos con sus agentes; el que está abierto y lo que se escribe.
     let threads = signal(Vec::<Thread>::new());
     let thread_open = signal(Option::<String>::None);
@@ -195,8 +200,8 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
-                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads()))).await {
-                            Some(Ok((list, pending, incs, ks, can, ths))) => {
+                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads(), p.mac_alive_at()))).await {
+                            Some(Ok((list, pending, incs, ks, can, ths, alive))) => {
                                 // El hilo pedido desde un incidente: abrirlo cuando el daemon contesta.
                                 if let Some(pid) = pending_thread.get()
                                     && let Some(i) = incs.iter().find(|i| i.id == pid && !i.waiting) {
@@ -242,9 +247,13 @@ pub fn App() -> impl IntoElement {
                                 if status.get().starts_with("Offline") {
                                     status.set(String::new());
                                 }
-                                sync_line.set(match pending {
-                                    0 => "in sync".to_string(),
-                                    n => format!("sending {n}…"),
+                                // Sin latido de la Mac en 12 min (late cada 5): está apagada o sin red; lo
+                                // que se mande espera a que vuelva.
+                                let mac_off = alive.filter(|at| sync::now_ms() - at > MAC_OFFLINE_MS);
+                                sync_line.set(match (pending, mac_off) {
+                                    (0, Some(at)) => format!("Mac offline · {}", theme::ago(at)),
+                                    (0, None) => "in sync".to_string(),
+                                    (n, _) => format!("sending {n}…"),
                                 });
                                 if approvals.get() != list {
                                     approvals.set(list);
@@ -746,6 +755,13 @@ pub fn App() -> impl IntoElement {
             k = k.child(view().pl(px(15.0)).child(status_tag(Health::Unknown, "Sending your request…")));
         } else if let Some(r) = inc.result.as_ref().filter(|r| !r.starts_with("thread ")) {
             k = k.child(view().pl(px(15.0)).child(status_tag(if r.starts_with("rejected") { Health::Bad } else { Health::Ok }, r.clone())));
+            // «PR <url> · workflow …»: el PR que se abrió antes de desplegar, para verlo.
+            if let Some(url) = r.strip_prefix("PR ").and_then(|t| t.split_whitespace().next()).filter(|u| u.starts_with("https://")) {
+                let url = url.to_string();
+                k = k.child(view().pl(px(15.0)).flex_row().child(theme::small_button("Open the PR", Variant::Outline, move || {
+                    let _ = scan::open_url(&url);
+                })));
+            }
         }
         if !is_expanded {
             return k;
@@ -855,12 +871,25 @@ pub fn App() -> impl IntoElement {
         // Desplegar: el flujo elegido en «⋯», confirmado deslizando (el flujo pide sus propias aprobaciones).
         if let Some((_, wid, name)) = deploy_pick.get().filter(|d| d.0 == inc.id) {
             let (a, id) = (ask.clone(), inc.id.clone());
+            let direct = deploy_direct.get();
             k = k
                 .child(theme::slide_to_confirm(format!("Slide to run “{name}”"), move || {
                     deploy_pick.set(None);
-                    a(id.clone(), "deploy", wid.clone());
+                    deploy_direct.set(false);
+                    a(id.clone(), "deploy", if direct { format!("{wid}|direct") } else { wid.clone() });
                 }))
-                .child(view().flex_row().justify_end().child(theme::small_button("Cancel", Variant::Outline, move || deploy_pick.set(None))));
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(view().flex_1().child(muted(if direct { "Deploys directly, without a PR." } else { "Opens a PR with the fix first." })))
+                        .child(theme::small_button(if direct { "With a PR" } else { "No PR" }, Variant::Outline, move || deploy_direct.set(!direct)))
+                        .child(theme::small_button("Cancel", Variant::Outline, move || {
+                            deploy_pick.set(None);
+                            deploy_direct.set(false);
+                        })),
+                );
         } else if fix_ready && open && inc.workflows.is_empty() {
             k = k.child(muted("Turn on a workflow on the Mac to deploy fixes from here."));
         }
@@ -937,6 +966,7 @@ pub fn App() -> impl IntoElement {
                 let health = match line.as_str() {
                     "in sync" => Health::Ok,
                     "offline" => Health::Bad,
+                    l if l.starts_with("Mac offline") => Health::Bad,
                     "" => Health::Unknown,
                     _ => Health::Warn,
                 };
@@ -966,7 +996,7 @@ pub fn App() -> impl IntoElement {
                         if line == "in sync" || line.is_empty() {
                             return view().into_element();
                         }
-                        let health = if line == "offline" { Health::Bad } else { Health::Warn };
+                        let health = if line == "offline" || line.starts_with("Mac offline") { Health::Bad } else { Health::Warn };
                         view().flex_row().items_center().px_4().h(px(24.0)).bg(c(tokens::GROUND)).child(status_tag(health, line)).into_element()
                     }))
                     .child(
@@ -1047,7 +1077,7 @@ pub fn App() -> impl IntoElement {
                                                         incidents.get()
                                                     },
                                                     // Lo abierto (la tarjeta, su menú, la respuesta entera) va en la llave: la fila se rearma al cambiar.
-                                                    move |i: &Incident| format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}", i.id, i.status, i.count, i.result, i.waiting, i.agent, i.workflows.len(), expanded.get().contains(&i.id), menu_open.get().as_deref() == Some(i.id.as_str()), answer_open.get().contains(&i.id), deploy_pick.get().is_some_and(|d| d.0 == i.id)),
+                                                    move |i: &Incident| format!("{}|{}|{}|{:?}|{}|{}|{}|{}|{}|{}|{}|{}", i.id, i.status, i.count, i.result, i.waiting, i.agent, i.workflows.len(), expanded.get().contains(&i.id), menu_open.get().as_deref() == Some(i.id.as_str()), answer_open.get().contains(&i.id), deploy_pick.get().is_some_and(|d| d.0 == i.id), deploy_direct.get()),
                                                     incident_row.clone(),
                                                 )).into_element()
                                             }}))
