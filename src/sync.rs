@@ -789,8 +789,8 @@ impl Phone {
         self.engine
             .rows(&self.keys_scope)
             .into_iter()
-            // Las deploy keys de cloud dev van solo al sitio en la nube: no son claves de proveedores.
-            .filter(|r| r.row.values.get("kind").and_then(Value::as_str) != Some("convex-deploy"))
+            // Las deploy keys de cloud dev y las variables de las apps van solo al sitio en la nube.
+            .filter(|r| !matches!(r.row.values.get("kind").and_then(Value::as_str), Some("convex-deploy" | "app-env")))
             .map(|r| {
                 let v = &r.row.values;
                 ProviderKey { id: r.row.id.clone(), kind: s(v, "kind"), label: s(v, "label"), model: s(v, "model"), key_hint: s(v, "keyHint"), opens: self.key(&r.row.id).is_ok() }
