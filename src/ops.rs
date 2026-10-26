@@ -212,14 +212,15 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
     // En qué quedó lo último que se pidió a un servicio.
     if ctx.asked.get() && (ctx.state.waiting || ctx.state.result.is_some()) {
         let (health, line) = match &ctx.state.result {
-            None => (Health::Unknown, crate::i18n::t("Sending your request to the Mac…")),
+            None if ctx.mac_on => (Health::Unknown, crate::i18n::t("Sending your request to the Mac…")),
+            None => (Health::Unknown, crate::i18n::t("Sending your request to the cloud site…")),
             Some(r) if r.starts_with("rejected") => (Health::Bad, r.trim_start_matches("rejected: ").to_string()),
             Some(r) => (Health::Ok, r.clone()),
         };
         col = col.child(status_tag(health, line));
     }
     if !ctx.mac_on && ctx.cloud_on {
-        col = col.child(muted("The Mac is off: local services run on the cloud site, with their own data."));
+        col = col.child(muted("The Mac is off: services run on the cloud site, against each project's cloud dev."));
     } else if !ctx.mac_on {
         col = col.child(muted("The Mac is off: its local services can be started when it's back."));
     }
