@@ -424,19 +424,27 @@ impl Phone {
                 let v = &r.row.values;
                 let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
                 let request_id = v.get("requestId").and_then(Value::as_str).map(str::to_string);
-                let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id.as_deref();
+                // Lo contestó la Mac (`resultFor`) o, con la Mac apagada, el sitio en la nube (`siteFor`).
+                let by_site = request_id.is_some() && v.get("siteFor").and_then(Value::as_str) == request_id.as_deref();
+                let answered = by_site || (request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id.as_deref());
+                // Lo que contestó el sitio va en el hilo junto con lo de la Mac, en orden.
+                let mut items = json_list(v, "items");
+                let site_items = json_list(v, "siteItems");
+                let site_at = site_items.iter().filter_map(|i| i["at"].as_i64()).max().unwrap_or(0);
+                items.extend(site_items);
+                items.sort_by_key(|i| i["at"].as_i64().unwrap_or(0));
                 Thread {
                     id: r.row.id.clone(),
                     title: s(v, "title"),
                     kind: s(v, "kind"),
                     status: s(v, "status"),
-                    updated_at: v.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
-                    items: json_list(v, "items"),
+                    updated_at: v.get("updatedAt").and_then(Value::as_i64).unwrap_or(0).max(site_at),
+                    items,
                     participants: json_list(v, "participants"),
                     waiting_answer: v.get("waitingAnswer").and_then(Value::as_bool).unwrap_or(false),
                     project: v.get("project").and_then(Value::as_str).map(str::to_string),
                     env: v.get("env").and_then(Value::as_str).map(str::to_string),
-                    result: v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string),
+                    result: if by_site { Some("answered by the cloud site".to_string()).filter(|_| own) } else { v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string) },
                     waiting: own && (r.pending || !answered),
                     sending: v.get("requestArg").and_then(Value::as_str).filter(|_| own && (r.pending || !answered)).map(str::to_string),
                 }
@@ -471,9 +479,11 @@ impl Phone {
             let v = &r.row.values;
             let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
             let request_id = v.get("requestId").and_then(Value::as_str);
-            let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id;
+            // Un hilo nuevo con la Mac apagada lo crea el sitio en la nube (`siteFor`, `siteResult`).
+            let by_site = request_id.is_some() && v.get("siteFor").and_then(Value::as_str) == request_id;
+            let answered = by_site || (request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id);
             waiting = own && (r.pending || !answered);
-            result = v.get("result").and_then(Value::as_str).filter(|_| own && answered).map(str::to_string);
+            result = v.get(if by_site { "siteResult" } else { "result" }).and_then(Value::as_str).filter(|_| own && answered).map(str::to_string);
             sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
         }
         Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending }
