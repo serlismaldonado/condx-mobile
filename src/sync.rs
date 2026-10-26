@@ -42,6 +42,35 @@ pub struct ProviderKey {
     pub opens: bool,
 }
 
+/// Un entorno de la Mac (`env:`): si su Convex responde.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Env {
+    pub name: String,
+    pub kind: String,
+    pub project: String,
+    pub deployment: String,
+    /// `None`: todavía no se revisó.
+    pub reachable: Option<bool>,
+}
+
+/// Un trabajo reciente de la Mac (`jobs:`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Job {
+    pub id: String,
+    pub title: String,
+    pub recipe: String,
+    pub env: String,
+    pub env_kind: String,
+    pub status: String,
+    pub requested_by: String,
+    pub created_at: i64,
+    /// Cuándo empezó a correr (después de la aprobación, si pedía una).
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub error: Option<String>,
+    pub commit: Option<String>,
+}
+
 /// Un incidente como lo ve el teléfono.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Incident {
@@ -265,6 +294,9 @@ pub struct Phone {
     /// Las claves de los proveedores cifradas para este teléfono (`keys:<daemon>`) y su identidad.
     keys_scope: String,
     threads_scope: String,
+    /// Los entornos y los trabajos recientes de la Mac (solo lectura).
+    env_scope: String,
+    jobs_scope: String,
     age: Option<age::x25519::Identity>,
     /// El deployment y el token del teléfono: para subir adjuntos a `/files`.
     url: String,
@@ -304,14 +336,18 @@ impl Phone {
         engine.enable_scope(&keys_scope, None).map_err(|e| e.to_string())?;
         let threads_scope = format!("threads:{}", identity.daemon_id);
         engine.enable_scope(&threads_scope, None).map_err(|e| e.to_string())?;
+        let env_scope = format!("env:{}", identity.daemon_id);
+        engine.enable_scope(&env_scope, None).map_err(|e| e.to_string())?;
+        let jobs_scope = format!("jobs:{}", identity.daemon_id);
+        engine.enable_scope(&jobs_scope, None).map_err(|e| e.to_string())?;
         let age = identity.age.as_deref().and_then(|a| a.parse::<age::x25519::Identity>().ok());
         let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
-        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, age, url: identity.url.clone(), token: identity.token.clone(), bell: None, rung_at: 0 })
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, env_scope, jobs_scope, age, url: identity.url.clone(), token: identity.token.clone(), bell: None, rung_at: 0 })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
     pub fn sync(&mut self) -> Result<Vec<Approval>, String> {
-        let scopes = [self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone(), self.threads_scope.clone()];
+        let scopes = [self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone(), self.threads_scope.clone(), self.env_scope.clone(), self.jobs_scope.clone()];
         let bell = self.bell.get_or_insert_with(|| crate::bell::Bell::start(&self.url, &self.token, &scopes, PROTOCOL_VERSION));
         let now = now_ms();
         // Con el timbre en vivo, solo lo que sonó; sin él (o de vez en cuando), el de HTTP.
@@ -515,6 +551,52 @@ impl Phone {
         let r = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_apk")?;
         let v = &r.row.values;
         Some((v.get("version")?.as_str()?.to_string(), v.get("versionCode")?.as_i64()?, v.get("url")?.as_str()?.to_string()))
+    }
+
+    /// Los entornos, por proyecto y nombre.
+    pub fn envs(&self) -> Vec<Env> {
+        let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let mut list: Vec<Env> = self
+            .engine
+            .rows(&self.env_scope)
+            .into_iter()
+            .map(|r| {
+                let v = &r.row.values;
+                Env { name: s(v, "name"), kind: s(v, "kind"), project: s(v, "project"), deployment: s(v, "deployment"), reachable: v.get("reachable").and_then(Value::as_bool) }
+            })
+            .collect();
+        list.sort_by(|a, b| (a.project.clone(), a.name.clone()).cmp(&(b.project.clone(), b.name.clone())));
+        list
+    }
+
+    /// Los trabajos recientes, el más nuevo primero.
+    pub fn jobs(&self) -> Vec<Job> {
+        let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let o = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).filter(|x| !x.is_empty()).map(str::to_string);
+        let mut list: Vec<Job> = self
+            .engine
+            .rows(&self.jobs_scope)
+            .into_iter()
+            .map(|r| {
+                let v = &r.row.values;
+                Job {
+                    id: r.row.id.clone(),
+                    title: s(v, "title"),
+                    recipe: s(v, "recipe"),
+                    env: s(v, "env"),
+                    env_kind: s(v, "envKind"),
+                    status: s(v, "status"),
+                    requested_by: s(v, "requestedBy"),
+                    created_at: v.get("createdAt").and_then(Value::as_i64).unwrap_or(0),
+                    started_at: v.get("startedAt").and_then(Value::as_i64),
+                    ended_at: v.get("endedAt").and_then(Value::as_i64),
+                    error: o(v, "error"),
+                    commit: o(v, "commit"),
+                }
+            })
+            .collect();
+        list.sort_by_key(|j| std::cmp::Reverse(j.created_at));
+        list
     }
 
     /// En qué idioma contestan los agentes (la configuración que publica la Mac en `_settings`).

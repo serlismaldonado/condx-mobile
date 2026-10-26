@@ -340,6 +340,12 @@ pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 
 /// Agregar (un hilo nuevo).
 pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
 /// Una laptop (la Mac contesta) y una nube (contesta el sitio en la nube). Trazos de Lucide (ISC).
+/// Las pestañas de abajo (trazos de Lucide, ISC).
+pub const TAB_THREADS: &[&str] = &["M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"];
+pub const TAB_APPROVALS: &[&str] = &["M22 11.08V12a10 10 0 1 1-5.93-9.14", "m9 11 3 3L22 4"];
+pub const TAB_JOBS: &[&str] = &["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"];
+pub const TAB_ENVS: &[&str] = &["M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2Z", "M6 6h.01", "M6 18h.01"];
+pub const TAB_INCIDENTS: &[&str] = &["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3", "M12 9v4", "M12 17h.01"];
 pub const SLIDERS: &[&str] = &["M20 7h-9", "M14 17H5", "M17 14a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M7 4a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z"];
 pub const LAPTOP: &[&str] = &["M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9", "M2 20h20", "M4 16h16l1.5 4h-19Z"];
 pub const CLOUD: &[&str] = &["M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"];
@@ -370,5 +376,52 @@ pub fn apply_scheme(scheme: &str, save: bool) {
     if save && let Some(d) = crate::secure::data_dir() {
         let _ = std::fs::write(d.join("prefs.json"), serde_json::json!({ "theme": scheme }).to_string());
     }
+}
+
+/// Una pestaña de la barra de abajo: ícono y nombre corto, con lo que espera.
+pub type Tab = (&'static str, &'static str, &'static [&'static str], usize);
+
+/// La barra de pestañas de abajo (como en las apps del teléfono): la elegida en el color del texto,
+/// las demás apagadas; lo que espera, en un globo ámbar sobre el ícono.
+pub fn tab_bar(tabs: Vec<Tab>, current: &str, on_pick: impl Fn(&'static str) + Clone + 'static) -> View {
+    let mut bar = view().flex_row().h(px(56.0)).border_t_1().border_color(c(tokens::CARD_BORDER)).bg(c(tokens::GROUND));
+    for (key, label, paths, count) in tabs {
+        let on = key == current;
+        let color = if on { tokens::FG } else { tokens::SUBTLE };
+        let pick = on_pick.clone();
+        let mut glyph = view().child(icon_view(paths, color, 21.0));
+        if count > 0 {
+            glyph = glyph.child(
+                view()
+                    .absolute()
+                    .top(px(-4.0))
+                    .right(px(-9.0))
+                    .min_w(px(16.0))
+                    .h(px(16.0))
+                    .px(px(4.0))
+                    .rounded(px(8.0))
+                    .items_center()
+                    .justify_center()
+                    .bg(c(tokens::ACCENT))
+                    .child(text(count.to_string()).text_size(px(10.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ON_ACCENT))),
+            );
+        }
+        bar = bar.child(
+            view()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap(px(3.0))
+                .active(|s| s.opacity(0.6))
+                .on_press(move || pick(key))
+                .child(glyph)
+                .child(text(label).text_size(px(10.5)).font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(c(color))),
+        );
+    }
+    bar
+}
+
+fn icon_view(paths: &'static [&'static str], color: (u32, u32), size: f32) -> View {
+    view().child(icon(paths, color, size))
 }
 

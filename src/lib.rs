@@ -14,6 +14,7 @@ pub mod chat;
 pub mod live;
 pub mod logos;
 pub mod md;
+pub mod ops;
 pub mod scan;
 pub mod secure;
 pub mod sync;
@@ -92,6 +93,12 @@ pub fn App() -> impl IntoElement {
     let deploy_direct = signal(false);
     // Hilos (F6): las corridas de los flujos con sus agentes; el que está abierto y lo que se escribe.
     let threads = signal(Vec::<Thread>::new());
+    // Los entornos y los trabajos recientes de la Mac (solo lectura) y el trabajo abierto.
+    let envs = signal(Vec::<sync::Env>::new());
+    let jobs = signal(Vec::<sync::Job>::new());
+    let job_open = signal(None::<String>);
+    // La lista de la pantalla principal: al cambiar de pestaña vuelve arriba.
+    let main_scroll = element_ref();
     // Ya llegó algo (de lo guardado o de la nube): sin esto, una lista vacía es «cargando» (skeleton).
     let loaded = signal(false);
     // Cuántos hilos se muestran: 20 y 20 más al acercarse al final.
@@ -197,11 +204,13 @@ pub fn App() -> impl IntoElement {
                     if let Ok(Err(e)) = opened {
                         status.set(format!("Couldn't open: {e}"));
                     }
-                    if let Some((ths, incs, list)) = with_phone(&slot, |p| (p.threads(), p.incidents(), p.approvals())).await
+                    if let Some((ths, incs, list, es, js)) = with_phone(&slot, |p| (p.threads(), p.incidents(), p.approvals(), p.envs(), p.jobs())).await
                         && (!ths.is_empty() || !incs.is_empty()) {
                             threads.set(ths);
                             incidents.set(incs);
                             approvals.set(list);
+                            envs.set(es);
+                            jobs.set(js);
                             loaded.set(true);
                             screen.set(Screen::Ready);
                         }
@@ -257,6 +266,14 @@ pub fn App() -> impl IntoElement {
                                     && catalog.get() != cat {
                                         catalog.set(cat);
                                     }
+                                if let Some((es, js)) = with_phone(&slot, |p| (p.envs(), p.jobs())).await {
+                                    if envs.get() != es {
+                                        envs.set(es);
+                                    }
+                                    if jobs.get() != js {
+                                        jobs.set(js);
+                                    }
+                                }
                                 if let Some(lang) = with_phone(&slot, |p| p.agent_language()).await
                                     && agent_lang.get() != lang {
                                         agent_lang.set(lang);
@@ -1045,8 +1062,8 @@ pub fn App() -> impl IntoElement {
         ..Default::default()
     };
     #[allow(deprecated)]
-    let shell = nsh_core::ui::stack();
-    shell.flex_1().child(nsh_core::ui::screen().flex_1().header_visible(false).status_bar(bar).child(view()
+    let (shell, page) = (nsh_core::ui::stack(), nsh_core::ui::screen());
+    shell.flex_1().child(page.flex_1().header_visible(false).status_bar(bar).child(view()
         .flex_1()
         .bg(c(tokens::GROUND))
         .text_color(c(tokens::FG))
@@ -1094,6 +1111,7 @@ pub fn App() -> impl IntoElement {
                                     .flex_1()
                                     .child(scroll()
                                     .flex_1()
+                                    .element_ref(&main_scroll)
                                     // Cerca del final, 20 hilos más (la lista entera no se arma de una vez).
                                     .on_scroll(move |e: &ScrollEvent| {
                                         let (y, h, total) = (f32::from(e.offset.y), f32::from(e.size.height), f32::from(e.content_size.height));
@@ -1107,28 +1125,22 @@ pub fn App() -> impl IntoElement {
                                             .gap_3()
                                             // Pestañas: un control segmentado compacto, con lo que espera en cada una; los hilos primero
                                             // (se abre en ellos).
+                                            // Ajustes: su título (las áreas van en la barra de abajo).
                                             .child(dynamic(move || {
-                                                let open = incidents.get().iter().filter(|i| i.status == "open").count();
-                                                let busy = threads.get().iter().filter(|t| t.waiting_answer || t.status == "waiting-approval").count();
-                                                let t = tab.get();
-                                                if t == "settings" {
-                                                    return view()
-                                                        .flex_row()
-                                                        .items_center()
-                                                        .gap_2()
-                                                        .h(px(34.0))
-                                                        .on_press(move || tab.set("threads"))
-                                                        .child(text("‹").text_size(px(24.0)).text_color(c(tokens::FG)))
-                                                        .child(text("Settings").text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
-                                                        .into_element();
+                                                if tab.get() != "settings" {
+                                                    return view().hidden().into_element();
                                                 }
-                                                theme::segmented(vec![
-                                                    ("Threads", busy, t == "threads", Box::new(move || tab.set("threads"))),
-                                                    ("Approvals", waiting_count.get(), t == "approvals", Box::new(move || tab.set("approvals"))),
-                                                    ("Incidents", open, t == "incidents", Box::new(move || tab.set("incidents"))),
-                                                ])
-                                                .into_element()
+                                                view()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_2()
+                                                    .on_press(move || tab.set("threads"))
+                                                    .child(text("‹").text_size(px(22.0)).text_color(c(tokens::FG)))
+                                                    .child(text("Settings").text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                                                    .into_element()
                                             }))
+                                            .child(dynamic(move || if tab.get() == "jobs" { ops::jobs(jobs.get(), job_open).into_element() } else { view().hidden().into_element() }))
+                                            .child(dynamic(move || if tab.get() == "envs" { ops::envs(envs.get()).into_element() } else { view().hidden().into_element() }))
                                             .child(dynamic(move || {
                                                 if tab.get() != "approvals" {
                                                     return view().hidden().into_element();
@@ -1243,6 +1255,30 @@ pub fn App() -> impl IntoElement {
                                                 ).into_element()
                                             }})),
                                     ))
+                                    // Las áreas, abajo: lo que espera en cada una sobre su ícono.
+                                    .child(dynamic(move || {
+                                        let current = tab.get();
+                                        let waiting_threads = threads.get().iter().filter(|t| t.waiting_answer || t.status == "waiting-approval").count();
+                                        let running = jobs.get().iter().filter(|j| j.status == "running").count();
+                                        let down = envs.get().iter().filter(|e| e.reachable == Some(false)).count();
+                                        let open = incidents.get().iter().filter(|i| i.status == "open").count();
+                                        theme::tab_bar(
+                                            vec![
+                                                ("threads", "Threads", theme::TAB_THREADS, waiting_threads),
+                                                ("approvals", "Approvals", theme::TAB_APPROVALS, waiting_count.get()),
+                                                ("jobs", "Jobs", theme::TAB_JOBS, running),
+                                                ("envs", "Envs", theme::TAB_ENVS, down),
+                                                ("incidents", "Incidents", theme::TAB_INCIDENTS, open),
+                                            ],
+                                            &current,
+                                            move |k| {
+                                                thread_open.set(None);
+                                                tab.set(k);
+                                                main_scroll.scroll_to(Point { x: Points(0.0), y: Points(0.0) }, false);
+                                            },
+                                        )
+                                        .into_element()
+                                    }))
                                     // Hilo nuevo: el botón flotante abajo a la derecha (en la lista de hilos).
                                     .child(dynamic(move || {
                                         if tab.get() != "threads" || thread_open.get().is_some() {
@@ -1251,7 +1287,8 @@ pub fn App() -> impl IntoElement {
                                         view()
                                             .absolute()
                                             .right(px(20.0))
-                                            .bottom(px(24.0))
+                                            // Encima de la barra de abajo (56).
+                                            .bottom(px(76.0))
                                             .w(px(46.0))
                                             .h(px(46.0))
                                             .rounded(px(23.0))
