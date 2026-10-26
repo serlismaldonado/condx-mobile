@@ -373,9 +373,58 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
             }
             block = block.child(head).child(rows(services.iter().map(|s| service_row(&project, s, &ctx, &mac_branch)).collect()));
         }
+        block = block.child(promote_block(&project, if ctx.mac_on { &sum["promote"] } else { &site_p["promote"] }, &ctx));
         col = col.child(block);
     }
     col
+}
+
+/// Pasar a producción por fusión: qué entra de `dev` a `main`, el CI y deslizar para fusionar (el
+/// despliegue lo hace el repo o Vercel al fusionar). Lo atiende la Mac o, sin ella, el sitio.
+fn promote_block(project: &str, p: &Value, ctx: &EnvsCtx) -> View {
+    if !p.is_object() || !(ctx.mac_on || ctx.cloud_on) {
+        return view();
+    }
+    let (base, head) = (p["base"].as_str().unwrap_or("main").to_string(), p["head"].as_str().unwrap_or("dev").to_string());
+    let ahead = p["ahead"].as_i64().unwrap_or(0);
+    let mut card = view().gap(px(6.0)).child(view().pt(px(4.0)).child(muted("Production")));
+    if ahead == 0 {
+        return card.child(rows(vec![view().child(status_tag(Health::Ok, crate::i18n::tr(format!("{base} is up to date with {head}"), format!("{base} está al día con {head}"))))]));
+    }
+    let ci = p["ci"].as_str().unwrap_or("none");
+    let (health, ci_word) = match ci {
+        "success" => (Health::Ok, "CI passed"),
+        "failure" => (Health::Bad, "CI failed"),
+        "pending" => (Health::Warn, "CI running"),
+        _ => (Health::Unknown, "No CI"),
+    };
+    let mut row = view()
+        .gap(px(6.0))
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .items_center()
+                .child(theme::icon(theme::BRANCH, tokens::SUBTLE, 13.0))
+                .child(view().flex_1().child(text(format!("{head} → {base}")).text_size(px(14.0)).font_family(theme::MONO_FONT).text_color(c(tokens::FG))))
+                .child(text(crate::i18n::tr(format!("{ahead} commits"), format!("{ahead} commits"))).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
+        )
+        .child(view().pl(px(16.0)).child(status_tag(health, crate::i18n::t(ci_word))));
+    for cm in p["commits"].as_array().into_iter().flatten().take(3) {
+        row = row.child(details(vec![format!("{} {}", cm["sha"].as_str().unwrap_or(""), cm["subject"].as_str().unwrap_or(""))], tokens::SUBTLE, false));
+    }
+    if matches!(ci, "success" | "none") {
+        let send = ctx.send.clone();
+        let asked = ctx.asked;
+        let project = project.to_string();
+        row = row.child(theme::slide_to_confirm(crate::i18n::tr(format!("Slide to merge {head} into {base}"), format!("Desliza para fusionar {head} en {base}")), move || {
+            asked.set(true);
+            send(json!({ "promote": { "project": project.clone() } }));
+        }));
+        row = row.child(muted("Merging deploys production (the repo's build or Vercel)."));
+    }
+    card = card.child(rows(vec![row]));
+    card
 }
 
 /// Cuánto duró un trabajo (desde que empezó a correr: sin la espera de la aprobación).
