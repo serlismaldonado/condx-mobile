@@ -223,3 +223,36 @@ fn claves_cifradas_en_el_telefono() {
     assert_eq!(opens(&mut b, 2).unwrap(), "sk-fake-not-real-A6");
     assert!(a.sync().is_err(), "a removed phone doesn't sync anymore");
 }
+
+#[test]
+#[ignore = "needs a throwaway condxd linked to a throwaway Condx Cloud, with the scripted agent and a flow named “Triage, ask, notify”"]
+fn hilos_desde_el_telefono() {
+    let (mut phone, _device) = paired_phone("Threads phone");
+    let flows = daemon("GET", "/api/workflows?project=ci-proj", None);
+    let wid = flows["workflows"].as_array().unwrap().iter().find(|w| w["workflow"]["name"] == "Triage, ask, notify").expect("the flow")["workflow"]["id"].as_str().unwrap().to_string();
+    let run = daemon("POST", &format!("/api/workflows/{wid}/run"), Some(serde_json::json!({ "event": { "source": "convex-error", "title": "Uncaught Error in orders:place" } })));
+    let rid = run["id"].as_str().expect("a run").to_string();
+    let wait = |phone: &mut Phone, what: &str, ok: &dyn Fn(&sync::Thread) -> bool| -> sync::Thread {
+        for _ in 0..120 {
+            let _ = phone.sync();
+            if let Some(t) = phone.threads().into_iter().find(|t| t.id == rid && ok(t)) {
+                return t;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        panic!("timed out waiting for {what}");
+    };
+    // El hilo llega con los agentes y la pregunta que espera.
+    let t = wait(&mut phone, "the question", &|t| t.waiting_answer);
+    assert!(t.items.iter().any(|i| i["kind"] == "agent" && i["author"] == "Risk"), "{:?}", t.items);
+    assert!(t.participants.iter().any(|p| p["node"] == "risk"));
+    // Preguntarle a un agente por su nombre: el daemon verifica la firma y se lo manda.
+    phone.thread_send(&rid, "@risk why that risk?").unwrap();
+    let t = wait(&mut phone, "the message to risk", &|t| !t.waiting && t.result.is_some());
+    assert_eq!(t.result.as_deref(), Some("sent to risk"));
+    // Responder la pregunta: el flujo sigue.
+    phone.thread_send(&rid, "yes, go ahead").unwrap();
+    let t = wait(&mut phone, "the answer", &|t| !t.waiting && t.result.as_deref() == Some("sent to question"));
+    let t = if t.status == "succeeded" { t } else { wait(&mut phone, "the flow to finish", &|t| t.status == "succeeded") };
+    assert!(t.items.iter().any(|i| i["kind"] == "user" && i["text"] == "yes, go ahead"), "{:?}", t.items);
+}

@@ -64,6 +64,29 @@ pub struct Incident {
     pub waiting: bool,
 }
 
+/// Un hilo (una corrida de un flujo con sus agentes, o un chat) como lo ve el teléfono.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Thread {
+    pub id: String,
+    pub title: String,
+    pub kind: String,
+    pub status: String,
+    pub updated_at: i64,
+    /// `[{kind, author, to, at, status, job, text}]`: los últimos mensajes, recortados.
+    pub items: Vec<Value>,
+    /// `[{node, name}]`: a quién se le puede escribir con `@node`.
+    pub participants: Vec<Value>,
+    pub waiting_answer: bool,
+    pub result: Option<String>,
+    pub waiting: bool,
+}
+
+/// Lo que firma el teléfono para escribir en un hilo (mismo texto en el daemon; otro prefijo que el
+/// de los incidentes).
+pub fn thread_message(daemon_id: &str, thread_id: &str, request_id: &str, at: i64, arg: &str) -> String {
+    format!("condx-thread:v1|{daemon_id}|{thread_id}|message|{request_id}|{at}|{arg}")
+}
+
 /// Lo que firma el teléfono para pedir algo sobre un incidente (mismo texto en el daemon).
 pub fn request_message(daemon_id: &str, incident_id: &str, request: &str, request_id: &str, at: i64, arg: &str) -> String {
     format!("condx-incident:v1|{daemon_id}|{incident_id}|{request}|{request_id}|{at}|{arg}")
@@ -208,6 +231,7 @@ pub struct Phone {
     incidents_scope: String,
     /// Las claves de los proveedores cifradas para este teléfono (`keys:<daemon>`) y su identidad.
     keys_scope: String,
+    threads_scope: String,
     age: Option<age::x25519::Identity>,
 }
 
@@ -229,14 +253,16 @@ impl Phone {
         engine.enable_scope(&incidents_scope, None).map_err(|e| e.to_string())?;
         let keys_scope = format!("keys:{}", identity.daemon_id);
         engine.enable_scope(&keys_scope, None).map_err(|e| e.to_string())?;
+        let threads_scope = format!("threads:{}", identity.daemon_id);
+        engine.enable_scope(&threads_scope, None).map_err(|e| e.to_string())?;
         let age = identity.age.as_deref().and_then(|a| a.parse::<age::x25519::Identity>().ok());
         let seed: [u8; 32] = unhex(&identity.seed).and_then(|b| b.try_into().ok()).ok_or("bad key in storage")?;
-        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, age })
+        Ok(Self { daemon_id: identity.daemon_id.clone(), key: SigningKey::from_bytes(&seed), engine, transport: ConvexHttpTransport::new(&identity.url, &identity.token), scope, incidents_scope, keys_scope, threads_scope, age })
     }
 
     /// Timbre + sincronizar. Devuelve las aprobaciones (pendientes primero).
     pub fn sync(&mut self) -> Result<Vec<Approval>, String> {
-        match self.transport.doorbell(&[self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone()], PROTOCOL_VERSION).map_err(|e| e.to_string())? {
+        match self.transport.doorbell(&[self.scope.clone(), self.incidents_scope.clone(), self.keys_scope.clone(), self.threads_scope.clone()], PROTOCOL_VERSION).map_err(|e| e.to_string())? {
             Doorbell::Versions(v) => self.engine.on_doorbell(&v, now_ms()).map_err(|e| e.to_string())?,
             Doorbell::UpgradeRequired => return Err("Condx Cloud needs a newer app".into()),
         }
@@ -327,6 +353,57 @@ impl Phone {
             .collect();
         list.sort_by_key(|i| (i.status != "open", std::cmp::Reverse(i.last_seen)));
         list
+    }
+
+    pub fn threads(&self) -> Vec<Thread> {
+        let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let json_list = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).and_then(|t| serde_json::from_str::<Vec<Value>>(t).ok()).unwrap_or_default();
+        let mine = hex(self.key.verifying_key().as_bytes());
+        let mut list: Vec<Thread> = self
+            .engine
+            .rows(&self.threads_scope)
+            .into_iter()
+            .map(|r| {
+                let v = &r.row.values;
+                let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
+                let request_id = v.get("requestId").and_then(Value::as_str).map(str::to_string);
+                let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id.as_deref();
+                Thread {
+                    id: r.row.id.clone(),
+                    title: s(v, "title"),
+                    kind: s(v, "kind"),
+                    status: s(v, "status"),
+                    updated_at: v.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
+                    items: json_list(v, "items"),
+                    participants: json_list(v, "participants"),
+                    waiting_answer: v.get("waitingAnswer").and_then(Value::as_bool).unwrap_or(false),
+                    result: v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string),
+                    waiting: own && (r.pending || !answered),
+                }
+            })
+            .collect();
+        list.sort_by_key(|t| std::cmp::Reverse(t.updated_at));
+        list
+    }
+
+    /// Escribe en un hilo: sale firmado en el próximo sync; el daemon verifica y decide a quién va.
+    pub fn thread_send(&mut self, thread_id: &str, text: &str) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err("write something".into());
+        }
+        let at = now_ms();
+        let request_id = random_hex(8);
+        let signature = self.key.sign(thread_message(&self.daemon_id, thread_id, &request_id, at, text).as_bytes());
+        let mut set = Values::new();
+        set.insert("request".into(), json!("message"));
+        set.insert("requestArg".into(), json!(text));
+        set.insert("requestId".into(), json!(request_id));
+        set.insert("requestedAt".into(), json!(at));
+        set.insert("deviceKey".into(), json!(hex(self.key.verifying_key().as_bytes())));
+        set.insert("signature".into(), json!(hex(&signature.to_bytes())));
+        self.engine.commit(vec![OpDraft::patch(&self.threads_scope, thread_id, set)], at).map_err(|e| e.to_string())?;
+        Ok(())
     }
 
     /// Para pruebas: a cuántos destinatarios está cifrada la clave de `id` y el texto cifrado, como los

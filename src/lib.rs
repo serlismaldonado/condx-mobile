@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use nsh_base::safe_area_view;
 use nsh_core::ui::prelude::*;
-use sync::{Approval, Incident, Phone, ProviderKey};
+use sync::{Approval, Incident, Phone, ProviderKey, Thread};
 use theme::{c, card, field, kind_tag, kv, mono, muted, section, status_tag, tokens, Health, Variant};
 
 #[native_module("condx-mobile/native")]
@@ -61,6 +61,10 @@ pub fn App() -> impl IntoElement {
     let tab = signal("approvals");
     let expanded = signal(Vec::<String>::new());
     let agent_text = signal(String::new());
+    // Hilos (F6): las corridas de los flujos con sus agentes; el que está abierto y lo que se escribe.
+    let threads = signal(Vec::<Thread>::new());
+    let thread_open = signal(Option::<String>::None);
+    let thread_text = signal(String::new());
     // Claves de proveedores cifradas para este teléfono (A6): cuáles llegaron y si se abren aquí.
     let keys = signal(Vec::<ProviderKey>::new());
     let can_keys = signal(true);
@@ -101,9 +105,12 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
-                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys()))).await {
-                            Some(Ok((list, pending, incs, ks, can))) => {
+                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads()))).await {
+                            Some(Ok((list, pending, incs, ks, can, ths))) => {
                                 incidents.set(incs);
+                                if threads.get() != ths {
+                                    threads.set(ths);
+                                }
                                 if keys.get() != ks {
                                     keys.set(ks);
                                 }
@@ -260,6 +267,22 @@ pub fn App() -> impl IntoElement {
                 }
                 if let Some(list) = with_phone(&slot, |p| p.incidents()).await {
                     incidents.set(list);
+                }
+            });
+        }
+    };
+
+    // Escribir en un hilo: sale firmado en el próximo sync; el daemon decide a quién va.
+    let send_thread = {
+        let slot = slot.clone();
+        move |id: String, text: String| {
+            let slot = slot.clone();
+            spawn(async move {
+                if let Some(Err(e)) = with_phone(&slot, move |p| p.thread_send(&id, &text)).await {
+                    status.set(format!("Couldn't send: {e}"));
+                }
+                if let Some(list) = with_phone(&slot, |p| p.threads()).await {
+                    threads.set(list);
                 }
             });
         }
@@ -595,6 +618,11 @@ pub fn App() -> impl IntoElement {
                                                     .gap_2()
                                                     .child(theme::button("Approvals", if tab.get() == "approvals" { Variant::Primary } else { Variant::Outline }, move || tab.set("approvals")))
                                                     .child(theme::button(incidents_label, if tab.get() == "incidents" { Variant::Primary } else { Variant::Outline }, move || tab.set("incidents")))
+                                                    .child({
+                                                        let busy = threads.get().iter().filter(|t| t.waiting_answer || matches!(t.status.as_str(), "running" | "waiting-approval" | "waiting-answer")).count();
+                                                        let label = if busy > 0 { format!("Threads · {busy}") } else { "Threads".to_string() };
+                                                        theme::button(label, if tab.get() == "threads" { Variant::Primary } else { Variant::Outline }, move || tab.set("threads"))
+                                                    })
                                                     .into_element()
                                             }))
                                             .child(dynamic(move || {
@@ -630,6 +658,15 @@ pub fn App() -> impl IntoElement {
                                                     incident_row.clone(),
                                                 )).into_element()
                                             }}))
+                                            .child(dynamic({
+                                                let send_thread = send_thread.clone();
+                                                move || {
+                                                    if tab.get() != "threads" {
+                                                        return view().into_element();
+                                                    }
+                                                    thread_view(threads.get(), thread_open, thread_text, send_thread.clone()).into_element()
+                                                }
+                                            }))
                                             .child(view().pt_2().child(section("This phone")))
                                             .child(
                                                 card()
@@ -659,5 +696,106 @@ pub fn App() -> impl IntoElement {
                             })),
                     ),
             ),
+        )
+}
+
+fn thread_health(status: &str) -> Health {
+    match status {
+        "running" | "waiting-approval" | "waiting-answer" => Health::Warn,
+        "succeeded" | "done" => Health::Ok,
+        "failed" | "stopped" => Health::Bad,
+        _ => Health::Unknown,
+    }
+}
+
+fn thread_state(t: &Thread) -> String {
+    match t.status.as_str() {
+        "running" => "Working…".into(),
+        "waiting-approval" => "Waiting for your approval (Approvals tab)".into(),
+        "waiting-answer" => "Waiting for your answer".into(),
+        "succeeded" => "Done".into(),
+        "done" => "Waiting for you".into(),
+        "cancelled" => "Cancelled".into(),
+        "failed" => "Failed".into(),
+        "stopped" => "Stopped".into(),
+        other => other.to_string(),
+    }
+}
+
+/// La lista de hilos o, si hay uno abierto, sus mensajes y dónde escribir.
+fn thread_view(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<String>, send: impl Fn(String, String) + Clone + 'static) -> View {
+    let Some(t) = open.get().and_then(|id| list.iter().find(|t| t.id == id).cloned()) else {
+        if list.is_empty() {
+            return view().child(card().child(muted("No threads yet. Flows with agents (Condx → Workflows) open one per run; you can follow and steer them here.")));
+        }
+        let mut col = view().gap_3();
+        for t in list {
+            let id = t.id.clone();
+            let last = t.items.iter().rev().find_map(|i| i["text"].as_str().map(str::to_string)).unwrap_or_default();
+            let last: String = last.lines().next().unwrap_or("").chars().take(110).collect();
+            col = col.child(
+                card()
+                    .child(view().flex_row().gap_2().items_center().child(view().flex_1().child(text(t.title.clone()).text_size(px(14.0)).text_color(c(tokens::FG)))).child(kind_tag(&t.kind)))
+                    .child(status_tag(thread_health(&t.status), format!("{} · {}", thread_state(&t), theme::ago(t.updated_at))))
+                    .child(muted(last))
+                    .child(view().flex_row().pt_1().child(theme::button("Open", Variant::Outline, move || open.set(Some(id.clone()))))),
+            );
+        }
+        return col;
+    };
+    let mut items = view().gap_2();
+    for it in t.items.iter().rev().take(25).rev() {
+        let body = it["text"].as_str().unwrap_or_default().to_string();
+        let kind = it["kind"].as_str().unwrap_or("system");
+        let el = match kind {
+            "user" => view().flex_row().child(view().flex_1()).child(view().p_2().border_1().border_color(c(tokens::CARD_BORDER)).bg(c(tokens::CARD)).child(text(body).text_size(px(13.0)).text_color(c(tokens::FG)))).into_element(),
+            "agent" | "reply" => view()
+                .gap_1()
+                .child(text(it["author"].as_str().unwrap_or("Agent").to_string()).text_size(px(12.0)).text_color(c(tokens::ACCENT)))
+                .child(text(body).text_size(px(13.0)).text_color(c(tokens::FG)))
+                .into_element(),
+            "event" => status_tag(Health::Bad, body).into_element(),
+            "question" => view().gap_1().child(status_tag(Health::Warn, "The flow asks you")).child(text(body).text_size(px(13.0)).text_color(c(tokens::FG))).into_element(),
+            "approval" => status_tag(Health::Warn, format!("{body} · approve it in the Approvals tab")).into_element(),
+            _ => muted(body).into_element(),
+        };
+        items = items.child(el);
+    }
+    // Los participantes: tocar uno lo menciona.
+    let mut people = view().flex_row().gap_1().flex_wrap();
+    for p in &t.participants {
+        let handle = p["node"].as_str().unwrap_or_default().to_string();
+        let name = p["name"].as_str().unwrap_or(&handle).to_string();
+        people = people.child(theme::button(format!("@{name}"), Variant::Outline, move || text_sig.set(format!("@{handle} "))));
+    }
+    let id = t.id.clone();
+    let placeholder: &'static str = if t.waiting_answer { "Answer the question…" } else { "Write to the agents… (@name to ask one)" };
+    view()
+        .gap_3()
+        .child(view().flex_row().child(theme::button("← Threads", Variant::Outline, move || open.set(None))))
+        .child(
+            card()
+                .child(text(t.title.clone()).text_size(px(15.0)).text_color(c(tokens::FG)))
+                .child(status_tag(thread_health(&t.status), thread_state(&t)))
+                .child(people),
+        )
+        .child(card().child(items))
+        .child(
+            card()
+                .child(field(placeholder, text_sig))
+                .child(view().flex_row().pt_1().child(theme::button("Send", Variant::Primary, move || {
+                    let msg = text_sig.get().trim().to_string();
+                    if msg.is_empty() {
+                        return;
+                    }
+                    text_sig.set(String::new());
+                    send(id.clone(), msg);
+                })))
+                .child(match (&t.result, t.waiting) {
+                    (_, true) => status_tag(Health::Unknown, "Sending… the Mac answers in the thread").into_element(),
+                    (Some(r), false) if r.starts_with("rejected") => status_tag(Health::Bad, r.clone()).into_element(),
+                    (Some(r), false) => status_tag(Health::Ok, r.clone()).into_element(),
+                    _ => view().into_element(),
+                }),
         )
 }
