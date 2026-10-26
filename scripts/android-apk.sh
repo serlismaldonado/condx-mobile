@@ -17,13 +17,16 @@ trap 'rm -rf "$TMP"' EXIT
 cp .nsh/out/condx-mobile.apk "$TMP/in.apk"
 zip -q -d "$TMP/in.apk" 'lib/x86_64/*' 'META-INF/*'
 # El manifiesto de nsh 0.2 solo pide INTERNET y no deja agregar permisos: se vuelve a enlazar el mismo
-# (con aapt2, como nsh) más el micrófono, para las notas de voz de los hilos.
+# (con aapt2, como nsh) más el micrófono, para las notas de voz de los hilos, y el ícono de Condx
+# (android/res: ícono adaptable en vectores; nsh no trae recursos, así que su resources.arsc se reemplaza).
 cat > "$TMP/AndroidManifest.xml" <<'XML'
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.condxmobile">
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <application android:label="condx-mobile"
+    <application android:label="Condx"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:extractNativeLibs="false"
         android:enableOnBackInvokedCallback="true"
         android:supportsRtl="true"
@@ -45,8 +48,9 @@ XML
 VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 IFS=. read -r MA MI PA <<<"$VERSION"
 CODE=$((MA * 10000 + MI * 100 + PA))
-"$BT/aapt2" link -o "$TMP/manifest.apk" -I "$ANDROID_HOME/platforms/android-35/android.jar" --manifest "$TMP/AndroidManifest.xml" --min-sdk-version 28 --target-sdk-version 35 --version-code "$CODE" --version-name "$VERSION"
-(cd "$TMP" && unzip -q -o manifest.apk AndroidManifest.xml -d m && zip -q -d in.apk AndroidManifest.xml && cd m && zip -q -X ../in.apk AndroidManifest.xml)
+"$BT/aapt2" compile --dir android/res -o "$TMP/res.zip"
+"$BT/aapt2" link -o "$TMP/manifest.apk" "$TMP/res.zip" -I "$ANDROID_HOME/platforms/android-35/android.jar" --manifest "$TMP/AndroidManifest.xml" --min-sdk-version 28 --target-sdk-version 35 --version-code "$CODE" --version-name "$VERSION"
+(cd "$TMP" && unzip -q -o manifest.apk -d m && zip -q -d in.apk AndroidManifest.xml resources.arsc && cd m && zip -q -X -0 ../in.apk resources.arsc && zip -q -X -r ../in.apk AndroidManifest.xml res)
 "$BT/zipalign" -P 16 -f 4 "$TMP/in.apk" "$TMP/aligned.apk"
 "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android --out .nsh/out/condx-mobile-arm64.apk "$TMP/aligned.apk"
 "$BT/zipalign" -c -P 16 4 .nsh/out/condx-mobile-arm64.apk
