@@ -84,6 +84,10 @@ pub struct Thread {
     pub waiting: bool,
     /// Lo que este teléfono mandó y todavía no contestó el daemon (se muestra al instante).
     pub sending: Option<String>,
+    /// Lo mandado ya salió del teléfono (está en la nube) y nadie lo tomó todavía: ✓.
+    pub delivered: bool,
+    /// El último mensaje de este teléfono ya lo tomó un agente (la Mac o el sitio en la nube): ✓✓.
+    pub read: bool,
 }
 
 /// Un adjunto subido: lo que el mensaje dice de él (el daemon lo baja con `id`).
@@ -447,6 +451,8 @@ impl Phone {
                     result: if by_site { Some("answered by the cloud site".to_string()).filter(|_| own) } else { v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string) },
                     waiting: own && (r.pending || !answered),
                     sending: v.get("requestArg").and_then(Value::as_str).filter(|_| own && (r.pending || !answered)).map(str::to_string),
+                    delivered: own && !r.pending && !answered,
+                    read: own && answered,
                 }
             })
             .collect();
@@ -474,7 +480,7 @@ impl Phone {
     pub fn new_thread(&self) -> Thread {
         let mine = hex(self.key.verifying_key().as_bytes());
         let row = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_new");
-        let (mut waiting, mut result, mut sending) = (false, None, None);
+        let (mut waiting, mut result, mut sending, mut delivered) = (false, None, None, false);
         if let Some(r) = &row {
             let v = &r.row.values;
             let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
@@ -485,8 +491,9 @@ impl Phone {
             waiting = own && (r.pending || !answered);
             result = v.get(if by_site { "siteResult" } else { "result" }).and_then(Value::as_str).filter(|_| own && answered).map(str::to_string);
             sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
+            delivered = own && !r.pending && !answered;
         }
-        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending }
+        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false }
     }
 
     /// El catálogo de agentes que publica el daemon (fila `_agents`): (id, nombre, marca del proveedor).

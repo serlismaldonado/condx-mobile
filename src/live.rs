@@ -110,6 +110,13 @@ pub fn shimmer(label: &str, size: f32) -> Text {
     t
 }
 
+/// Un círculo que gira mientras algo se envía (con el reloj de los cuadros, como el brillo).
+pub fn spinner(size: f32) -> View {
+    FRAME.set(true);
+    let turn = (seconds() / 0.9).fract() * std::f32::consts::TAU;
+    view().child(text("◌").text_size(px(size)).text_color(c(tokens::SUBTLE)).rotate(radians(turn)))
+}
+
 /// Si algo pidió otro cuadro desde el último (y lo olvida).
 pub fn wants_frame() -> bool {
     FRAME.replace(false)

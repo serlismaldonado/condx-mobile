@@ -754,8 +754,13 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                     ),
                 );
             }
+            // ✓✓ bajo tu último mensaje cuando un agente ya lo tomó.
+            let last_user = t.items.iter().rposition(|i| i["kind"] == "user").filter(|_| t.read && t.sending.is_none());
             for (ix, it) in t.items.iter().enumerate().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
                 items = items.child(message(it, Some(ix) == last_question && t.waiting_answer, &quick, approvals, &decide, reply, &handles));
+                if Some(ix) == last_user {
+                    items = items.child(view().items_end().mt(px(-10.0)).child(text("✓✓").text_size(px(12.0)).text_color(c(tokens::ACCENT))));
+                }
             }
             // Lo que acabas de mandar, al instante, hasta que el daemon lo contesta.
             if let Some(pending) = t.sending.clone() {
@@ -766,7 +771,8 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .gap_1()
                         .opacity(0.75)
                         .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
-                        .child(text("Sending…").text_size(px(11.0)).text_color(c(tokens::SUBTLE))),
+                        // Enviándose (todavía en el teléfono): gira; ya en la nube, esperando al agente: ✓.
+                        .child(if t.delivered { view().child(text("✓").text_size(px(12.0)).text_color(c(tokens::SUBTLE))) } else { live::spinner(12.0) }),
                 );
             }
             // Con un agente escribiendo, su burbuja ya dice que trabaja.
