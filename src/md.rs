@@ -120,6 +120,8 @@ enum Style {
     Bold,
     Italic,
     Code,
+    /// Código dentro de negrita (`**`next`**`, como escribe Claude).
+    BoldCode,
     Link,
 }
 
@@ -147,7 +149,15 @@ fn spans(src: &str) -> Vec<(Style, String)> {
         if ch == '*' && chars.get(i + 1) == Some(&'*')
             && let Some(end) = find(i + 2, &['*', '*']).filter(|&e| e > i + 2) {
                 push(&mut out, &mut plain);
-                out.push((Style::Bold, chars[i + 2..end].iter().collect()));
+                // Lo de adentro también tiene tramos: el código sigue siendo código (en negrita).
+                let inner: String = chars[i + 2..end].iter().collect();
+                for (style, s) in spans(&inner) {
+                    out.push((match style {
+                        Style::Code => Style::BoldCode,
+                        Style::Plain => Style::Bold,
+                        other => other,
+                    }, s));
+                }
                 i = end + 2;
                 continue;
             }
@@ -183,6 +193,7 @@ pub fn inline(src: &str, size: f32, color: (u32, u32)) -> Text {
             Style::Bold => text(s).font_weight(FontWeight::SEMIBOLD),
             Style::Italic => text(s).italic(),
             Style::Code => text(s).font_family(MONO_FONT).text_size(px(size - 1.5)).text_color(c(tokens::CODE_INLINE)),
+            Style::BoldCode => text(s).font_family(MONO_FONT).font_weight(FontWeight::SEMIBOLD).text_size(px(size - 1.5)).text_color(c(tokens::CODE_INLINE)),
             Style::Link => text(s).underline().text_color(c(tokens::INFO)),
         });
     }
@@ -338,6 +349,21 @@ fn table(head: &[String], rows: &[Vec<String>], size: f32) -> View {
             (longest as f32 * size * 0.56 + 20.0).clamp(64.0, 230.0)
         })
         .collect();
+    // Más ancha que la pantalla del teléfono: una tarjeta por fila (el primer valor de título, el resto
+    // como «columna: valor»), que se lee sin desplazarse de lado.
+    if widths.iter().sum::<f32>() > 330.0 && head.len() > 2 {
+        let mut col = view().gap(px(6.0));
+        for r in rows {
+            let mut card = view().gap(px(3.0)).px(px(10.0)).py(px(8.0)).rounded(px(8.0)).border_1().border_color(c(tokens::CARD_BORDER));
+            card = card.child(inline(r.first().map(String::as_str).unwrap_or(""), size, tokens::FG).font_weight(FontWeight::SEMIBOLD));
+            for (h, v) in head.iter().zip(r.iter()).skip(1).filter(|(_, v)| !v.trim().is_empty()) {
+                let line = format!("{}: {v}", h.replace("**", ""));
+                card = card.child(inline(&line, size - 1.0, tokens::MUTED));
+            }
+            col = col.child(card);
+        }
+        return col;
+    }
     let row = |cells: &[String], header: bool, last: bool| {
         let mut r = view().flex_row();
         if header {
@@ -407,5 +433,14 @@ mod tests {
         assert!(has_table("| a |\n|---|") && !has_table("a | b\nno"));
         // Sin cierre: queda como texto.
         assert_eq!(spans("a `b"), vec![(Style::Plain, "a `b".to_string())]);
+    }
+
+    #[test]
+    fn codigo_dentro_de_negrita() {
+        let s = spans("**`next`** 16.1.4 y **muy `importante`**");
+        assert_eq!(s[0], (Style::BoldCode, "next".into()));
+        assert_eq!(s[1], (Style::Plain, " 16.1.4 y ".into()));
+        assert_eq!(s[2], (Style::Bold, "muy ".into()));
+        assert_eq!(s[3], (Style::BoldCode, "importante".into()));
     }
 }

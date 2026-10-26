@@ -810,7 +810,11 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                 );
             }
             // ✓✓ junto a la hora de tu último mensaje cuando un agente ya lo tomó.
-            let last_user = t.items.iter().rposition(|i| i["kind"] == "user").filter(|_| t.read && t.sending.is_none());
+            // Leído: lo dice la respuesta a tu pedido en este hilo o, en el primero de un hilo nuevo (que
+            // se pidió en `_new`), que un agente ya contestó o escribe después de él.
+            let last_user = t.items.iter().rposition(|i| i["kind"] == "user").filter(|&ix| {
+                t.sending.is_none() && (t.read || t.items[ix + 1..].iter().any(|i| matches!(i["kind"].as_str(), Some("agent" | "reply" | "external")) || i["live"] == true))
+            });
             for (ix, it) in t.items.iter().enumerate().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
                 let mut it = it.clone();
                 if Some(ix) == last_user {
