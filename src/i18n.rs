@@ -161,6 +161,8 @@ const ES: &[(&str, &str)] = &[
     ("Open", "Abrir"),
     ("Services on the cloud site", "Servicios en el sitio en la nube"),
     ("The Mac is off: local services run on the cloud site, with their own data.", "La Mac está apagada: los servicios locales corren en el sitio en la nube, con sus propios datos."),
+    ("Push branch", "Subir la rama"),
+    ("On the cloud site (no cloud dev key yet)", "En la nube (falta la clave de cloud dev)"),
     // Avisos.
     ("Install", "Instalar"),
 ];

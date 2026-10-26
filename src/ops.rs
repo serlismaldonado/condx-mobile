@@ -82,8 +82,9 @@ fn megabytes(bytes: u64) -> String {
     }
 }
 
-/// Un servicio local (backend, deployer, frontend): estado, uso y sus botones.
-fn service_row(project: &str, svc: &Value, ctx: &EnvsCtx) -> View {
+/// Un servicio local (backend, deployer, frontend): estado, uso y sus botones. `branch`: la rama de
+/// la Mac, para que el sitio en la nube siga desde ahí.
+fn service_row(project: &str, svc: &Value, ctx: &EnvsCtx, branch: &str) -> View {
     let st = |k: &str| svc[k].as_str().unwrap_or_default().to_string();
     let status = st("status");
     let busy = svc["busy"].as_str().map(str::to_string);
@@ -124,10 +125,10 @@ fn service_row(project: &str, svc: &Value, ctx: &EnvsCtx) -> View {
         let ask = |action: &'static str| {
             let send = ctx.send.clone();
             let asked = ctx.asked;
-            let (project, name) = (project.to_string(), st("name"));
+            let (project, name, branch) = (project.to_string(), st("name"), branch.to_string());
             move || {
                 asked.set(true);
-                send(json!({ "service": { "project": project, "name": name, "action": action } }));
+                send(json!({ "service": { "project": project, "name": name, "action": action, "branch": branch } }));
             }
         };
         title_row = if status == "running" {
@@ -313,27 +314,64 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
         }
         block = block.child(rows(items));
         // Los servicios locales: el backend, el deployer y el frontend del proyecto.
-        // Con la Mac apagada, los del sitio en la nube (el mismo proyecto, clonado allá).
-        let services: Vec<Value> = if ctx.mac_on {
-            sum["services"].as_array().cloned().unwrap_or_default()
-        } else {
-            ctx.site["projects"].as_array().into_iter().flatten().find(|p| p["name"] == project.as_str()).and_then(|p| p["services"].as_array().cloned()).unwrap_or_default()
-        };
+        // Con la Mac apagada, los del sitio en la nube (el mismo proyecto, clonado allá, contra su cloud dev).
+        let site_p = ctx.site["projects"].as_array().into_iter().flatten().find(|p| p["name"] == project.as_str()).cloned().unwrap_or(Value::Null);
+        let services: Vec<Value> = if ctx.mac_on { sum["services"].as_array().cloned().unwrap_or_default() } else { site_p["services"].as_array().cloned().unwrap_or_default() };
+        let mac_branch = git["branch"].as_str().unwrap_or("").to_string();
+        // Seguir en la nube: la rama de la Mac tiene que estar en GitHub. Con la Mac encendida, se le
+        // pide que la suba; con la Mac apagada, se dice qué rama tiene la nube y si falta algo.
+        let ahead = git["ahead"].as_i64().unwrap_or(0);
+        let changes = git["changed"].as_i64().unwrap_or(0) + git["untracked"].as_i64().unwrap_or(0);
+        let main_branch = matches!(mac_branch.as_str(), "main" | "master" | "dev" | "develop" | "");
+        if ctx.mac_on && ahead > 0 && !main_branch {
+            let send = ctx.send.clone();
+            let asked = ctx.asked;
+            let p = project.clone();
+            block = block.child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .child(view().flex_1().child(muted(crate::i18n::tr(format!("{ahead} commits only on the Mac: push them to continue in the cloud"), format!("{ahead} commits solo en la Mac: súbelos para seguir en la nube")))))
+                    .child(theme::small_button("Push branch", Variant::Outline, move || {
+                        asked.set(true);
+                        send(json!({ "handoff": { "project": p } }));
+                    })),
+            );
+        } else if !ctx.mac_on && site_p.is_object() {
+            let cloud_branch = site_p["git"]["branch"].as_str().unwrap_or("").to_string();
+            let mut parts = vec![crate::i18n::tr(format!("Cloud: {cloud_branch}"), format!("Nube: {cloud_branch}"))];
+            if !mac_branch.is_empty() && mac_branch != cloud_branch {
+                parts.push(crate::i18n::tr(format!("Mac: {mac_branch} (switches when you start)"), format!("Mac: {mac_branch} (cambia al levantar)")));
+            }
+            if ahead > 0 || changes > 0 {
+                parts.push(crate::i18n::tr(format!("{} only on the Mac", ahead + changes), format!("{} solo en la Mac", ahead + changes)));
+            }
+            block = block.child(details(parts, if ahead + changes > 0 { tokens::WARNING } else { tokens::SUBTLE }, false));
+        }
         if !services.is_empty() {
             let stopped = services.iter().filter(|s| s["status"] != "running").count();
-            let where_ = if ctx.mac_on { "Local services" } else { "Services on the cloud site" };
+            let where_ = if ctx.mac_on {
+                crate::i18n::t("Local services")
+            } else {
+                match site_p["target"]["env"].as_str() {
+                    Some(env) => crate::i18n::tr(format!("On the cloud site → {env}"), format!("En la nube → {env}")),
+                    None => crate::i18n::t("On the cloud site (no cloud dev key yet)"),
+                }
+            };
             let mut head = view().flex_row().items_center().pt(px(4.0)).child(view().flex_1().child(muted(where_)));
             if (ctx.mac_on || ctx.cloud_on) && services.iter().all(|s| s["busy"].is_null()) {
                 let (label, action) = if stopped > 0 { ("Start all", "start") } else { ("Stop all", "stop") };
                 let send = ctx.send.clone();
                 let asked = ctx.asked;
                 let p = project.clone();
+                let b = mac_branch.clone();
                 head = head.child(theme::small_button(label, Variant::Outline, move || {
                     asked.set(true);
-                    send(json!({ "service": { "project": p, "name": "all", "action": action } }));
+                    send(json!({ "service": { "project": p, "name": "all", "action": action, "branch": b } }));
                 }));
             }
-            block = block.child(head).child(rows(services.iter().map(|s| service_row(&project, s, &ctx)).collect()));
+            block = block.child(head).child(rows(services.iter().map(|s| service_row(&project, s, &ctx, &mac_branch)).collect()));
         }
         col = col.child(block);
     }
