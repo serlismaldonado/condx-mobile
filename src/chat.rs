@@ -984,7 +984,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                     .flex_1()
                                     .pl_2()
                                     .gap(px(2.0))
-                                    .child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                                    .child(text(crate::i18n::t(&t.title)).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
                                     .child(if t.id == "_new" {
                                         text(crate::i18n::t("The agents answer here")).text_size(px(11.5)).text_color(c(tokens::MUTED)).into_element()
                                     } else {
