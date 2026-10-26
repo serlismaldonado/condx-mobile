@@ -90,7 +90,7 @@ pub fn dot(health: Health) -> impl IntoElement {
 /// Estado como punto de color y texto apagado.
 pub fn status_tag(health: Health, label: impl Into<String>) -> impl IntoElement {
     // El texto se corta a dos líneas (un error largo no se sale de la pantalla).
-    view().flex_row().gap_2().items_center().child(dot(health)).child(view().flex_1().child(text(label.into()).number_of_lines(2u32).text_size(px(12.0)).text_color(c(tokens::MUTED))))
+    view().flex_row().gap_2().items_center().child(dot(health)).child(view().flex_1().child(text(crate::i18n::t(&label.into())).number_of_lines(2u32).text_size(px(12.0)).text_color(c(tokens::MUTED))))
 }
 
 /// El estado de algo en una píldora de su color (punto, texto y borde).
@@ -101,7 +101,7 @@ pub fn pill(health: Health, label: impl Into<String>) -> impl IntoElement {
         Health::Bad => tokens::DANGER,
         Health::Unknown => tokens::SUBTLE,
     };
-    view().flex_row().gap(px(5.0)).items_center().px(px(7.0)).h(px(20.0)).rounded(px(10.0)).border_1().border_color(c(tone)).child(dot(health)).child(text(label.into()).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(tone)))
+    view().flex_row().gap(px(5.0)).items_center().px(px(7.0)).h(px(20.0)).rounded(px(10.0)).border_1().border_color(c(tone)).child(dot(health)).child(text(crate::i18n::t(&label.into())).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(tone)))
 }
 
 /// Tipo de entorno: texto pequeño con borde; solo producción lleva color.
@@ -116,6 +116,7 @@ pub fn kind_tag(kind: &str) -> impl IntoElement {
         other => other,
     }
     .to_string();
+    let label = crate::i18n::t(&label);
     // Producción con su marco rojo; los demás, solo el texto (sin borde: no compite con el estado).
     let tag = view().h(px(18.0)).justify_center().child(text(label).text_size(px(11.0)).text_color(if prod { c(tokens::PROD) } else { c(tokens::SUBTLE) }));
     if prod { tag.px(px(6.0)).border_1().border_color(c(tokens::PROD)) } else { tag }
@@ -128,11 +129,11 @@ pub fn card() -> View {
 
 /// Etiqueta de sección: versalitas pequeñas (como «ENVIRONMENTS» en escritorio).
 pub fn section(title: &str) -> impl IntoElement {
-    text(title.to_uppercase()).text_size(px(11.0)).text_color(c(tokens::SUBTLE))
+    text(crate::i18n::t(title).to_uppercase()).text_size(px(11.0)).text_color(c(tokens::SUBTLE))
 }
 
 pub fn muted(label: impl Into<String>) -> impl IntoElement {
-    text(label.into()).text_size(px(12.5)).text_color(c(tokens::MUTED))
+    text(crate::i18n::t(&label.into())).text_size(px(12.5)).text_color(c(tokens::MUTED))
 }
 
 pub fn mono(label: impl Into<String>, size: f32) -> impl IntoElement {
@@ -155,7 +156,7 @@ pub enum Variant {
 }
 
 pub fn button(label: impl Into<String>, variant: Variant, on_press: impl Fn() + 'static) -> impl IntoElement {
-    let label: String = label.into();
+    let label: String = crate::i18n::t(&label.into());
     let (bg, border, fg) = match variant {
         Variant::Primary => (Some(tokens::ACCENT), tokens::ACCENT, tokens::ON_ACCENT),
         Variant::Outline => (None, tokens::CARD_BORDER, tokens::FG),
@@ -174,7 +175,7 @@ pub fn button(label: impl Into<String>, variant: Variant, on_press: impl Fn() + 
 pub fn field(placeholder: &'static str, value: Signal<String>) -> Input {
     input()
         .value(move || value.get())
-        .placeholder(placeholder)
+        .placeholder(crate::i18n::t(placeholder))
         .placeholder_color(move || now(tokens::SUBTLE))
         .selection_color(move || now(tokens::ACCENT))
         .auto_correct(false)
@@ -191,12 +192,18 @@ pub fn field(placeholder: &'static str, value: Signal<String>) -> Input {
 
 /// «12s ago», «3 min ago», «2 h ago», «4 d ago» (como `ui::ago`).
 pub fn ago(ms: i64) -> String {
+    let span = short(ms);
+    if crate::i18n::spanish() { format!("hace {span}") } else { format!("{span} ago") }
+}
+
+/// Cuánto hace, sin «hace»: «3 min».
+pub fn short(ms: i64) -> String {
     let s = ((crate::sync::now_ms() - ms) / 1000).max(0);
     match s {
-        0..=59 => format!("{s}s ago"),
-        60..=3599 => format!("{} min ago", s / 60),
-        3600..=86_399 => format!("{} h ago", s / 3600),
-        _ => format!("{} d ago", s / 86_400),
+        0..=59 => format!("{s} s"),
+        60..=3599 => format!("{} min", s / 60),
+        3600..=86_399 => format!("{} h", s / 3600),
+        _ => format!("{} d", s / 86_400),
     }
 }
 
@@ -204,7 +211,7 @@ pub fn ago(ms: i64) -> String {
 /// dedo (en nativo, sin trabajo por cuadro) y, si llega casi al final, `on_done`; si no, vuelve.
 /// Reemplaza escribir el nombre del entorno: es igual de deliberado y no se hace por accidente.
 pub fn slide_to_confirm(label: impl Into<String>, on_done: impl Fn() + Clone + 'static) -> impl IntoElement {
-    let label: String = label.into();
+    let label: String = crate::i18n::t(&label.into());
     const KNOB: f32 = 48.0;
     const HEIGHT: f32 = 48.0;
     let width = signal(0.0f32);
@@ -271,7 +278,7 @@ pub fn slide_to_confirm(label: impl Into<String>, on_done: impl Fn() + Clone + '
 /// Botón chico (30 de alto, ancho justo): las acciones de una tarjeta, que no compiten con su
 /// contenido.
 pub fn small_button(label: impl Into<String>, variant: Variant, on_press: impl Fn() + 'static) -> View {
-    let label: String = label.into();
+    let label: String = crate::i18n::t(&label.into());
     let (bg, border, fg) = match variant {
         Variant::Primary => (Some(tokens::ACCENT), tokens::ACCENT, tokens::ON_ACCENT),
         Variant::Outline => (None, tokens::CARD_BORDER, tokens::FG),
@@ -302,7 +309,7 @@ pub fn segmented(items: Vec<Segment>) -> View {
             .justify_center()
             .rounded(px(6.0))
             .on_press(on_press)
-            .child(text(label).text_size(px(13.0)).font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(c(if selected { tokens::FG } else { tokens::MUTED })));
+            .child(text(crate::i18n::t(label)).text_size(px(13.0)).font_weight(if selected { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(c(if selected { tokens::FG } else { tokens::MUTED })));
         if selected {
             seg = seg.bg(c(tokens::CARD)).border_1().border_color(c(tokens::CARD_BORDER));
         }
@@ -415,7 +422,7 @@ pub fn tab_bar(tabs: Vec<Tab>, current: &str, on_pick: impl Fn(&'static str) + C
                 .active(|s| s.opacity(0.6))
                 .on_press(move || pick(key))
                 .child(glyph)
-                .child(text(label).text_size(px(10.5)).font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(c(color))),
+                .child(text(crate::i18n::t(label)).text_size(px(10.5)).font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL }).text_color(c(color))),
         );
     }
     bar

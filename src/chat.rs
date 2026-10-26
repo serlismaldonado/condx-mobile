@@ -76,7 +76,7 @@ fn status_line(health: Health, state: &str, t: &Thread) -> View {
             Health::Warn => tokens::WARNING,
             _ => tokens::MUTED,
         };
-        row = row.child(theme::dot(health)).child(text(state.to_string()).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(color)));
+        row = row.child(theme::dot(health)).child(text(crate::i18n::t(state)).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(color)));
         if t.project.is_some() || t.env.is_some() {
             row = row.child(text("·").text_size(px(11.5)).text_color(c(tokens::SUBTLE)));
         }
@@ -101,7 +101,7 @@ fn activity_of(t: &Thread) -> Option<String> {
     let it = t.items.iter().rev().find(|i| i["live"] == true)?;
     let who = it["author"].as_str().unwrap_or("Agent");
     let doing = if it["text"].as_str().is_some_and(|s| !s.trim().is_empty()) && it["activity"] == "Thinking…" { "Writing…" } else { it["activity"].as_str().unwrap_or("Thinking…") };
-    Some(format!("{who} · {doing}"))
+    Some(format!("{who} · {}", crate::i18n::t(doing)))
 }
 
 pub fn thread_state(t: &Thread) -> String {
@@ -226,7 +226,7 @@ fn user_text(body: &str) -> View {
             n_chips += 1;
         } else if let Some(rest) = line.strip_prefix("[voice") {
             let (head, said) = rest.split_once(']').unwrap_or((rest, ""));
-            chips = chips.child(file_chip("audio", format!("Voice note{}", head), tokens::FG));
+            chips = chips.child(file_chip("audio", crate::i18n::tr(format!("Voice note{}", head), format!("Nota de voz{}", head)), tokens::FG));
             n_chips += 1;
             if !said.trim().is_empty() {
                 lines.push(said.trim().to_string());
@@ -273,9 +273,9 @@ fn approval_card(job: String, body: String, approvals: Signal<Vec<Approval>>, de
             (Some(_), false, Some("approved")) => Some((Health::Ok, "Approved from this phone".to_string())),
             (Some(_), false, Some("rejected the job")) => Some((Health::Bad, "Rejected from this phone".to_string())),
             (Some(_), false, Some("needs-mac")) => Some((Health::Warn, "Waiting for Touch ID on the Mac".to_string())),
-            (Some(_), false, Some(r)) => Some((Health::Bad, format!("The Mac didn't apply it: {}", r.trim_start_matches("rejected: ")))),
-            (Some(d), false, None) => Some((Health::Unknown, format!("You chose {d} · the Mac checks it"))),
-            (None, _, _) if !waiting => Some((Health::Unknown, format!("Done: {}", a.status))),
+            (Some(_), false, Some(r)) => Some((Health::Bad, crate::i18n::tr(format!("The Mac didn't apply it: {}", r.trim_start_matches("rejected: ")), format!("La Mac no lo aplicó: {}", r.trim_start_matches("rejected: "))))),
+            (Some(d), false, None) => Some((Health::Unknown, crate::i18n::tr(format!("You chose {d} · the Mac checks it"), format!("Elegiste {d} · la Mac lo revisa")))),
+            (None, _, _) if !waiting => Some((Health::Unknown, crate::i18n::tr(format!("Done: {}", a.status), format!("Terminado: {}", a.status)))),
             _ => None,
         };
         b = b.child(muted(format!("{} · {}{}", a.env, a.level, if prod { " · production: Touch ID on the Mac" } else { "" })));
@@ -378,7 +378,7 @@ fn short_ago(ms: i64) -> String {
     if ms <= 0 {
         return String::new();
     }
-    theme::ago(ms).trim_end_matches(" ago").to_string()
+    theme::short(ms)
 }
 
 /// El texto de un agente: la prosa arriba y los campos de su resultado (`clave: valor`) como filas.
@@ -537,7 +537,7 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                 )
                 // En cola: sale cuando un agente termina (ya trabajan tantos como el límite).
                 .child(if it["status"] == "queued" {
-                    text("Queued · goes out when an agent is free").text_size(px(11.0)).text_color(c(tokens::WARNING)).into_element()
+                    text(crate::i18n::t("Queued · goes out when an agent is free")).text_size(px(11.0)).text_color(c(tokens::WARNING)).into_element()
                 } else {
                     // ✓✓ antes de la hora, en el mismo gris (como Claude), cuando un agente ya lo leyó.
                     let mut row = view().flex_row().items_center().gap(px(4.0));
@@ -668,8 +668,8 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
     let more = list.len() > shown;
     let list: Vec<Thread> = list.into_iter().take(shown).collect();
     if list.is_empty() {
-        return view().items_center().gap_2().py(px(48.0)).px_4().child(text("No threads yet").text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
-            text("Flows with agents (Condx → Workflows) open one per run. You can follow them and answer here.")
+        return view().items_center().gap_2().py(px(48.0)).px_4().child(text(crate::i18n::t("No threads yet")).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
+            text(crate::i18n::t("Flows with agents (Condx → Workflows) open one per run. You can follow them and answer here."))
                 .text_size(px(13.0))
                 .line_height(px(19.0))
                 .text_center()
@@ -704,7 +704,7 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
                 live::shimmer(&doing, 13.0).into_element()
             })
             .into_element(),
-            (None, n) if n > 0 => text(if n == 1 { "1 message waits for a free agent".to_string() } else { format!("{n} messages wait for a free agent") }).text_size(px(13.0)).text_color(c(tokens::MUTED)).into_element(),
+            (None, n) if n > 0 => text(match (n, crate::i18n::spanish()) { (1, false) => "1 message waits for a free agent".to_string(), (_, false) => format!("{n} messages wait for a free agent"), (1, true) => "1 mensaje espera un agente libre".to_string(), (_, true) => format!("{n} mensajes esperan un agente libre") }).text_size(px(13.0)).text_color(c(tokens::MUTED)).into_element(),
             _ => text(preview).number_of_lines(2u32).text_size(px(13.0)).line_height(px(18.0)).text_color(c(tokens::MUTED)).into_element(),
         };
         let mut row = view()
@@ -784,8 +784,8 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
             let mut items = view().gap(px(14.0)).px_4().py_4();
             if t.id == "_new" && t.sending.is_none() {
                 items = items.child(
-                    view().items_center().gap_2().py(px(40.0)).px_4().child(text("Start a conversation").text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
-                        text("Ask the agents about your project: they read your code and what Condx knows (environments, jobs, incidents, flows). You can attach a photo or send a voice note.")
+                    view().items_center().gap_2().py(px(40.0)).px_4().child(text(crate::i18n::t("Start a conversation")).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
+                        text(crate::i18n::t("Ask the agents about your project: they read your code and what Condx knows (environments, jobs, incidents, flows). You can attach a photo or send a voice note."))
                             .text_size(px(13.0))
                             .line_height(px(19.0))
                             .text_center()
@@ -810,9 +810,9 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .pl(px(56.0))
                         .gap_1()
                         .opacity(0.75)
-                        .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
+                        .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text(crate::i18n::t("Attachment")).text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
                         // Enviándose (todavía en el teléfono): gira; ya en la nube, esperando al agente: ✓.
-                        .child(view().flex_row().items_center().gap(px(4.0)).child(if t.delivered { check_mark(false, tokens::SUBTLE) } else { live::spinner(10.0) }).child(text("now").text_size(px(11.0)).text_color(c(tokens::SUBTLE)))),
+                        .child(view().flex_row().items_center().gap(px(4.0)).child(if t.delivered { check_mark(false, tokens::SUBTLE) } else { live::spinner(10.0) }).child(text(crate::i18n::t("now")).text_size(px(11.0)).text_color(c(tokens::SUBTLE)))),
                 );
             }
             // Con un agente escribiendo, su burbuja ya dice que trabaja.
@@ -824,7 +824,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
     };
     let placeholder = {
         let current = current.clone();
-        move || if current().is_some_and(|t| t.waiting_answer) { "Answer the question…".to_string() } else { "Message the agents…".to_string() }
+        move || if current().is_some_and(|t| t.waiting_answer) { crate::i18n::t("Answer the question…") } else { crate::i18n::t("Message the agents…") }
     };
     // El campo de escribir: los chips de agentes lo enfocan y ponen el cursor al final.
     let field = element_ref();
@@ -882,7 +882,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
             }
             // Lo que hizo el daemon con tu último mensaje (entregado ya se ve en el hilo).
             let delivery = match (&t.result, t.waiting) {
-                (Some(r), false) if r.starts_with("rejected") => Some((Health::Bad, format!("Couldn't deliver it: {}", r.trim_start_matches("rejected: ")))),
+                (Some(r), false) if r.starts_with("rejected") => Some((Health::Bad, crate::i18n::tr(format!("Couldn't deliver it: {}", r.trim_start_matches("rejected: ")), format!("No se pudo entregar: {}", r.trim_start_matches("rejected: "))))),
                 _ => None,
             };
             view()
@@ -958,7 +958,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                     .gap(px(2.0))
                                     .child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
                                     .child(if t.id == "_new" {
-                                        text("The agents answer here").text_size(px(11.5)).text_color(c(tokens::MUTED)).into_element()
+                                        text(crate::i18n::t("The agents answer here")).text_size(px(11.5)).text_color(c(tokens::MUTED)).into_element()
                                     } else {
                                         {
                                             let (health, state) = state_of(&t);
@@ -1032,7 +1032,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .rounded(px(6.0))
                         .bg(c(tokens::HOVER))
                         .child(view().w(px(3.0)).h(px(32.0)).rounded(px(2.0)).bg(c(tokens::WARNING)))
-                        .child(view().flex_1().gap(px(1.0)).child(text(format!("Replying to {name}")).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(text(snippet).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::MUTED))))
+                        .child(view().flex_1().gap(px(1.0)).child(text(crate::i18n::tr(format!("Replying to {name}"), format!("Respondiendo a {name}"))).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(text(snippet).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::MUTED))))
                         .child(view().w(px(36.0)).h(px(36.0)).items_center().justify_center().on_press(move || reply.set(None)).child(text("×").text_size(px(18.0)).text_color(c(tokens::MUTED))))
                         .into_element(),
                     None => view().into_element(),
@@ -1125,7 +1125,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                     .gap_3()
                                     .items_center()
                                     .child(round(38.0).border_1().border_color(c(tokens::CARD_BORDER)).active(|s| s.bg(c(tokens::ACTIVE))).on_press(move || stop_drop(false)).child(text("×").text_size(px(19.0)).text_color(c(tokens::MUTED))))
-                                    .child(view().flex_1().flex_row().gap_2().items_center().child(view().w(px(10.0)).h(px(10.0)).rounded(px(5.0)).bg(c(tokens::DANGER))).child(text(format!("Recording · {}", clock(secs))).text_size(px(14.5)).text_color(c(tokens::FG))))
+                                    .child(view().flex_1().flex_row().gap_2().items_center().child(view().w(px(10.0)).h(px(10.0)).rounded(px(5.0)).bg(c(tokens::DANGER))).child(text(crate::i18n::tr(format!("Recording · {}", clock(secs)), format!("Grabando · {}", clock(secs)))).text_size(px(14.5)).text_color(c(tokens::FG))))
                                     .child(round(38.0).bg(c(tokens::ACCENT)).active(|s| s.opacity(0.8)).on_press(move || stop_send(true)).child(theme::icon(theme::ARROW_UP, tokens::ON_ACCENT, 20.0))),
                             )
                             .into_element();

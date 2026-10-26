@@ -69,6 +69,33 @@ pub struct Job {
     pub ended_at: Option<i64>,
     pub error: Option<String>,
     pub commit: Option<String>,
+    /// La cola del registro (solo de los que corren o fallaron).
+    pub log: Option<String>,
+}
+
+/// Una receta que se puede pedir desde el teléfono: en qué tipos de entorno y sus argumentos
+/// (nombre, tipo, valor por defecto).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecipeInfo {
+    pub name: String,
+    pub title: String,
+    pub kinds: Vec<String>,
+    pub args: Vec<(String, String, Option<String>)>,
+}
+
+/// Un flujo encendido de la Mac.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlowInfo {
+    pub id: String,
+    pub name: String,
+    pub project: String,
+}
+
+/// Lo último que este teléfono pidió correr: si espera y qué contestó la Mac.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RunState {
+    pub waiting: bool,
+    pub result: Option<String>,
 }
 
 /// Un incidente como lo ve el teléfono.
@@ -592,11 +619,64 @@ impl Phone {
                     ended_at: v.get("endedAt").and_then(Value::as_i64),
                     error: o(v, "error"),
                     commit: o(v, "commit"),
+                    log: o(v, "log"),
                 }
             })
             .collect();
         list.sort_by_key(|j| std::cmp::Reverse(j.created_at));
         list
+    }
+
+    /// Lo que se puede pedir correr (la fila `_catalog` que publica la Mac).
+    pub fn run_catalog(&self) -> (Vec<RecipeInfo>, Vec<FlowInfo>) {
+        let Some(v) = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_catalog").and_then(|r| r.row.values.get("catalog").and_then(Value::as_str).and_then(|t| serde_json::from_str::<Value>(t).ok())) else {
+            return (vec![], vec![]);
+        };
+        let st = |x: &Value| x.as_str().unwrap_or_default().to_string();
+        let recipes = v["recipes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| RecipeInfo {
+                name: st(&r["name"]),
+                title: st(&r["title"]),
+                kinds: r["kinds"].as_array().into_iter().flatten().map(st).collect(),
+                args: r["args"].as_array().into_iter().flatten().map(|a| (st(&a["name"]), st(&a["type"]), a["default"].as_str().map(str::to_string))).collect(),
+            })
+            .collect();
+        let flows = v["flows"].as_array().into_iter().flatten().map(|f| FlowInfo { id: st(&f["id"]), name: st(&f["name"]), project: st(&f["project"]) }).collect();
+        (recipes, flows)
+    }
+
+    /// Pide correr una receta (`{recipe, env, args}`) o un flujo (`{flow}`): firmado en `_run`; la Mac
+    /// lo verifica y aplica las mismas aprobaciones que si se pidiera allá.
+    pub fn run(&mut self, ask: &Value) -> Result<(), String> {
+        let at = now_ms();
+        let request_id = random_hex(8);
+        let arg = ask.to_string();
+        let signature = self.key.sign(request_message(&self.daemon_id, "_run", "run", &request_id, at, &arg).as_bytes());
+        let mut set = Values::new();
+        set.insert("request".into(), json!("run"));
+        set.insert("requestArg".into(), json!(arg));
+        set.insert("requestId".into(), json!(request_id));
+        set.insert("requestedAt".into(), json!(at));
+        set.insert("deviceKey".into(), json!(hex(self.key.verifying_key().as_bytes())));
+        set.insert("signature".into(), json!(hex(&signature.to_bytes())));
+        self.engine.commit(vec![OpDraft::patch(&self.threads_scope, "_run", set)], at).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Cómo va lo último que este teléfono pidió correr.
+    pub fn run_state(&self) -> RunState {
+        let mine = hex(self.key.verifying_key().as_bytes());
+        let Some(r) = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_run") else { return RunState::default() };
+        let v = &r.row.values;
+        if v.get("deviceKey").and_then(Value::as_str) != Some(mine.as_str()) {
+            return RunState::default();
+        }
+        let request_id = v.get("requestId").and_then(Value::as_str);
+        let answered = request_id.is_some() && v.get("resultFor").and_then(Value::as_str) == request_id;
+        RunState { waiting: r.pending || !answered, result: v.get("result").and_then(Value::as_str).filter(|_| answered).map(str::to_string) }
     }
 
     /// En qué idioma contestan los agentes (la configuración que publica la Mac en `_settings`).

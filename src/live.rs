@@ -98,6 +98,7 @@ fn mix(a: u32, b: u32, t: f32) -> u32 {
 pub fn shimmer(label: &str, size: f32) -> Text {
     FRAME.set(true);
     let band = -0.3 + 1.6 * ((seconds() / SHIMMER).fract());
+    let label = crate::i18n::t(label);
     let chars: Vec<char> = label.chars().collect();
     let count = chars.len().saturating_sub(1).max(1) as f32;
     let (dim, lit) = (tokens::SUBTLE, tokens::FG);

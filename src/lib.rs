@@ -11,6 +11,7 @@
 pub mod audio;
 pub mod bell;
 pub mod chat;
+pub mod i18n;
 pub mod live;
 pub mod logos;
 pub mod md;
@@ -97,6 +98,10 @@ pub fn App() -> impl IntoElement {
     let envs = signal(Vec::<sync::Env>::new());
     let jobs = signal(Vec::<sync::Job>::new());
     let job_open = signal(None::<String>);
+    // Pedir correr una receta o un flujo: el formulario, el catálogo de la Mac y cómo va lo pedido.
+    let run_form = ops::RunForm::new();
+    let run_catalog = signal((Vec::<sync::RecipeInfo>::new(), Vec::<sync::FlowInfo>::new()));
+    let run_state = signal(sync::RunState::default());
     // La lista de la pantalla principal: al cambiar de pestaña vuelve arriba.
     let main_scroll = element_ref();
     // Ya llegó algo (de lo guardado o de la nube): sin esto, una lista vacía es «cargando» (skeleton).
@@ -202,7 +207,7 @@ pub fn App() -> impl IntoElement {
                         blocking(move || Phone::open(&id).map(|p| *slot.lock().unwrap() = Some(p))).await
                     };
                     if let Ok(Err(e)) = opened {
-                        status.set(format!("Couldn't open: {e}"));
+                        status.set(crate::i18n::tr(format!("Couldn't open: {e}"), format!("No se pudo abrir: {e}")));
                     }
                     if let Some((ths, incs, list, es, js)) = with_phone(&slot, |p| (p.threads(), p.incidents(), p.approvals(), p.envs(), p.jobs())).await
                         && (!ths.is_empty() || !incs.is_empty()) {
@@ -235,7 +240,7 @@ pub fn App() -> impl IntoElement {
                                 blocking(move || Phone::open(&id).map(|p| *slot.lock().unwrap() = Some(p))).await
                             };
                             if let Ok(Err(e)) = opened {
-                                status.set(format!("Couldn't open: {e}"));
+                                status.set(crate::i18n::tr(format!("Couldn't open: {e}"), format!("No se pudo abrir: {e}")));
                             }
                         }
                         screen.set(Screen::Ready);
@@ -266,6 +271,14 @@ pub fn App() -> impl IntoElement {
                                     && catalog.get() != cat {
                                         catalog.set(cat);
                                     }
+                                if let Some((cat, st)) = with_phone(&slot, |p| (p.run_catalog(), p.run_state())).await {
+                                    if run_catalog.get() != cat {
+                                        run_catalog.set(cat);
+                                    }
+                                    if run_state.get() != st {
+                                        run_state.set(st);
+                                    }
+                                }
                                 if let Some((es, js)) = with_phone(&slot, |p| (p.envs(), p.jobs())).await {
                                     if envs.get() != es {
                                         envs.set(es);
@@ -310,7 +323,7 @@ pub fn App() -> impl IntoElement {
                                 }
                                 sync_line.set(match (pending, mac_off) {
                                     (0, Some(0)) => "Mac offline".to_string(),
-                                    (0, Some(at)) => format!("Mac offline · {}", theme::ago(at)),
+                                    (0, Some(at)) => crate::i18n::tr(format!("Mac offline · {}", theme::ago(at)), format!("Mac apagada · {}", theme::ago(at))),
                                     (0, None) => "in sync".to_string(),
                                     (n, _) => format!("sending {n}…"),
                                 });
@@ -452,7 +465,7 @@ pub fn App() -> impl IntoElement {
             let slot = slot.clone();
             spawn(async move {
                 if let Some(Err(e)) = with_phone(&slot, move |p| p.decide(&job, approve, confirm)).await {
-                    status.set(format!("Couldn't decide: {e}"));
+                    status.set(crate::i18n::tr(format!("Couldn't decide: {e}"), format!("No se pudo decidir: {e}")));
                 }
                 kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.approvals()).await {
@@ -469,13 +482,29 @@ pub fn App() -> impl IntoElement {
     };
 
     // Un pedido sobre un incidente: sale firmado en el próximo sync; el daemon decide.
+    // Pedir correr algo (firmado en `_run`): sale enseguida y se ve qué contestó la Mac.
+    let run_send: std::rc::Rc<dyn Fn(serde_json::Value)> = {
+        let slot = slot.clone();
+        std::rc::Rc::new(move |ask: serde_json::Value| {
+            let slot = slot.clone();
+            spawn(async move {
+                if let Some(Err(e)) = with_phone(&slot, move |p| p.run(&ask)).await {
+                    status.set(crate::i18n::tr(format!("Couldn't send: {e}"), format!("No se pudo enviar: {e}")));
+                }
+                kick.set(true);
+                if let Some(st) = with_phone(&slot, |p| p.run_state()).await {
+                    run_state.set(st);
+                }
+            });
+        })
+    };
     let ask = {
         let slot = slot.clone();
         move |id: String, request: &'static str, arg: String| {
             let slot = slot.clone();
             spawn(async move {
                 if let Some(Err(e)) = with_phone(&slot, move |p| p.request(&id, request, &arg)).await {
-                    status.set(format!("Couldn't send: {e}"));
+                    status.set(crate::i18n::tr(format!("Couldn't send: {e}"), format!("No se pudo enviar: {e}")));
                 }
                 kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.incidents()).await {
@@ -505,7 +534,7 @@ pub fn App() -> impl IntoElement {
             }
             app_owner.run(|| spawn(async move {
                 if let Some(Err(e)) = with_phone(&slot, move |p| p.thread_send_with(&id, &text, &files)).await {
-                    status.set(format!("Couldn't send: {e}"));
+                    status.set(crate::i18n::tr(format!("Couldn't send: {e}"), format!("No se pudo enviar: {e}")));
                 }
                 kick.set(true);
                 if let Some(list) = with_phone(&slot, |p| p.threads()).await {
@@ -693,10 +722,10 @@ pub fn App() -> impl IntoElement {
             (Some(_), false, Some("rejected the job"), _) => (Health::Unknown, "Rejected from this phone".to_string()),
             (Some(_), false, Some("needs-mac"), _) => (Health::Warn, "Waiting for Touch ID on the Mac".to_string()),
             // Llegó tarde o la Mac la rechazó: un resultado, no una alarma.
-            (Some(_), false, Some(r), _) => (Health::Unknown, format!("Not applied: {}", r.trim_start_matches("rejected: "))),
-            (Some(d), false, None, _) => (Health::Unknown, format!("You chose {d} · the Mac checks it")),
-            (None, _, _, "waiting-approval") => (Health::Warn, if prod { "Production: Touch ID on the Mac".to_string() } else { format!("Needs your approval · {}", item.level) }),
-            (None, _, _, s) => (Health::Unknown, format!("Done: {s}")),
+            (Some(_), false, Some(r), _) => (Health::Unknown, crate::i18n::tr(format!("Not applied: {}", r.trim_start_matches("rejected: ")), format!("No se aplicó: {}", r.trim_start_matches("rejected: ")))),
+            (Some(d), false, None, _) => (Health::Unknown, crate::i18n::tr(format!("You chose {d} · the Mac checks it"), format!("Elegiste {d} · la Mac lo revisa"))),
+            (None, _, _, "waiting-approval") => (Health::Warn, if prod { "Production: Touch ID on the Mac".to_string() } else { crate::i18n::tr(format!("Needs your approval · {}", item.level), format!("Espera tu aprobación · {}", item.level)) }),
+            (None, _, _, s) => (Health::Unknown, crate::i18n::tr(format!("Done: {s}"), format!("Terminado: {s}"))),
         };
         let (requested_by, recipe, created_at) = (item.requested_by.clone(), item.recipe.clone(), item.created_at);
         let summary = move || {
@@ -803,7 +832,7 @@ pub fn App() -> impl IntoElement {
                             .items_center()
                             .child(theme::dot(health))
                             .child(view().flex_1().child(text(inc.title.clone()).number_of_lines(if is_expanded { 3u32 } else { 1u32 }).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
-                            .child(text(theme::ago(inc.last_seen).trim_end_matches(" ago").to_string()).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
+                            .child(text(theme::short(inc.last_seen)).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
                     )
                     .child(
                         view()
@@ -867,7 +896,7 @@ pub fn App() -> impl IntoElement {
         if fix_ready {
             k = k.child(status_tag(Health::Ok, {
                 let n = fix["files"].as_array().map(Vec::len).unwrap_or(0);
-                format!("Fix on {} · {n} file{}", fix["branch"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" })
+                crate::i18n::tr(format!("Fix on {} · {n} file{}", fix["branch"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" }), format!("Arreglo en {} · {n} archivo{}", fix["branch"].as_str().unwrap_or("?"), if n == 1 { "" } else { "s" }))
             }));
         }
         // Acciones: las de siempre como botones chicos; las demás en «⋯».
@@ -931,7 +960,7 @@ pub fn App() -> impl IntoElement {
                             menu_open.set(None);
                             deploy_pick.set(Some(pick.clone()));
                         })
-                        .child(text(format!("Deploy the fix with “{name}”")).number_of_lines(1u32).text_size(px(13.5)).text_color(c(tokens::FG))),
+                        .child(text(crate::i18n::tr(format!("Deploy the fix with “{name}”"), format!("Desplegar el arreglo con «{name}»"))).number_of_lines(1u32).text_size(px(13.5)).text_color(c(tokens::FG))),
                 );
             }
             k = k.child(m);
@@ -941,7 +970,7 @@ pub fn App() -> impl IntoElement {
             let (a, id) = (ask.clone(), inc.id.clone());
             let direct = deploy_direct.get();
             k = k
-                .child(theme::slide_to_confirm(format!("Slide to run “{name}”"), move || {
+                .child(theme::slide_to_confirm(crate::i18n::tr(format!("Slide to run “{name}”"), format!("Desliza para correr «{name}»")), move || {
                     deploy_pick.set(None);
                     deploy_direct.set(false);
                     a(id.clone(), "deploy", if direct { format!("{wid}|direct") } else { wid.clone() });
@@ -1136,10 +1165,19 @@ pub fn App() -> impl IntoElement {
                                                     .gap_2()
                                                     .on_press(move || tab.set("threads"))
                                                     .child(text("‹").text_size(px(22.0)).text_color(c(tokens::FG)))
-                                                    .child(text("Settings").text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                                                    .child(text(crate::i18n::t("Settings")).text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
                                                     .into_element()
                                             }))
-                                            .child(dynamic(move || if tab.get() == "jobs" { ops::jobs(jobs.get(), job_open).into_element() } else { view().hidden().into_element() }))
+                                            .child(dynamic({
+                                                let run_send = run_send.clone();
+                                                move || {
+                                                    if tab.get() != "jobs" {
+                                                        return view().hidden().into_element();
+                                                    }
+                                                    let (recipes, flows) = run_catalog.get();
+                                                    view().gap_3().child(ops::run_panel(run_form, envs.get(), recipes, flows, run_state.get(), run_send.clone())).child(ops::jobs(jobs.get(), job_open)).into_element()
+                                                }
+                                            }))
                                             .child(dynamic(move || if tab.get() == "envs" { ops::envs(envs.get()).into_element() } else { view().hidden().into_element() }))
                                             .child(dynamic(move || {
                                                 if tab.get() != "approvals" {
@@ -1202,6 +1240,7 @@ pub fn App() -> impl IntoElement {
                                             // Este teléfono: abajo de aprobaciones e incidentes (en los hilos, el chat ocupa la pantalla).
                                             .child(dynamic({
                                                 let unpair = unpair.clone();
+                                                let run_send = run_send.clone();
                                                 move || {
                                                 if tab.get() != "settings" {
                                                     return view().hidden().into_element();
@@ -1227,8 +1266,24 @@ pub fn App() -> impl IntoElement {
                                                         ("Light", 0, scheme_now == "light", pick("light")),
                                                         ("Dark", 0, scheme_now == "dark", pick("dark")),
                                                     ]))
-                                                    .child(section("Agents"))
-                                                    .child(card().rounded(px(10.0)).child(kv("Answer in", text(lang).text_size(px(13.0)))).child(muted("Set it on the Mac: Condx → Settings → Agents → Limits.")))
+                                                    .child(section("Agents answer in"))
+                                                    .child({
+                                                        // Se manda firmado a la Mac (como un pedido); se ve enseguida.
+                                                        let current = agent_lang.get();
+                                                        let pick_lang = |code: &'static str| -> Box<dyn Fn()> {
+                                                            let run_send = run_send.clone();
+                                                            Box::new(move || {
+                                                                agent_lang.set(code.to_string());
+                                                                run_send(serde_json::json!({ "settings": { "language": code } }));
+                                                            })
+                                                        };
+                                                        theme::segmented(vec![
+                                                            ("Automatic", 0, current.is_empty(), pick_lang("")),
+                                                            ("Español", 0, current == "es", pick_lang("es")),
+                                                            ("English", 0, current == "en", pick_lang("en")),
+                                                        ])
+                                                    })
+                                                    .child(muted(if lang == "Same as each message" { "Automatic: each agent answers in the language of the message." } else { "Every agent, on the Mac and in the cloud site, answers in this language." }))
                                                     .child(section("This phone")).child(
                                                 card().rounded(px(10.0))
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
@@ -1354,7 +1409,7 @@ fn update_banner(latest: Option<(String, i64, String)>) -> AnyElement {
         .rounded(px(10.0))
         .border_1()
         .border_color(c(tokens::ACCENT))
-        .child(view().flex_1().gap(px(2.0)).child(text(format!("Condx {version} is ready")).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(text(format!("You have {VERSION}. Download it and Android installs it over this one.")).text_size(px(12.0)).text_color(c(tokens::MUTED))))
+        .child(view().flex_1().gap(px(2.0)).child(text(crate::i18n::tr(format!("Condx {version} is ready"), format!("Condx {version} está lista"))).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(text(crate::i18n::tr(format!("You have {VERSION}. Download it and Android installs it over this one."), format!("Tienes la {VERSION}. Descárgala y Android la instala sobre esta."))).text_size(px(12.0)).text_color(c(tokens::MUTED))))
         .child(
             view()
                 .px_3()
@@ -1368,7 +1423,7 @@ fn update_banner(latest: Option<(String, i64, String)>) -> AnyElement {
                         log::error!("update: couldn't open the download: {e}");
                     }
                 })
-                .child(text("Install").text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ON_ACCENT))),
+                .child(text(crate::i18n::t("Install")).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ON_ACCENT))),
         )
         .into_element()
 }
