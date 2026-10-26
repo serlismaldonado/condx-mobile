@@ -10,6 +10,7 @@
 
 pub mod audio;
 pub mod chat;
+pub mod live;
 pub mod logos;
 pub mod md;
 pub mod scan;
@@ -65,7 +66,7 @@ pub fn App() -> impl IntoElement {
     let approvals = signal(Vec::<Approval>::new());
     // Incidentes (A0b): la lista, la pestaña elegida, las tarjetas abiertas y el mensaje al agente.
     let incidents = signal(Vec::<Incident>::new());
-    let tab = signal("approvals");
+    let tab = signal("threads");
     let expanded = signal(Vec::<String>::new());
     // El menú «⋯» abierto (uno a la vez), las respuestas que se ven enteras y el incidente cuyo hilo
     // se pidió (se abre cuando el daemon contesta «thread <id>»).
@@ -98,15 +99,27 @@ pub fn App() -> impl IntoElement {
     let pairing_text = signal(String::new());
     let pairing_url = signal(String::new());
 
+    // Cerrar el hilo: primero se suelta el teclado y después se quita el campo; si se quita en el
+    // mismo cambio, el «soltar» llega sin campo enfocado y el teclado queda abierto sobre la lista.
+    let close_thread: std::rc::Rc<dyn Fn()> = std::rc::Rc::new(move || {
+        dismiss_keyboard();
+        app_owner.run(|| {
+            spawn(async move {
+                timer(Duration::from_millis(60)).await;
+                thread_text.set(String::new());
+                thread_open.set(None);
+            })
+        });
+    });
     // El botón «atrás» de Android: cierra lo abierto (la cita, el hilo, el menú) antes de salir de la app.
+    let close_back = close_thread.clone();
     on_back_press(move || {
         if global::<md::OpenCode>().get().0.is_some() {
             global::<md::OpenCode>().set(md::OpenCode(None));
         } else if thread_reply.get().is_some() {
             thread_reply.set(None);
         } else if thread_open.get().is_some() {
-            thread_text.set(String::new());
-            thread_open.set(None);
+            close_back();
         } else if menu_open.get().is_some() || deploy_pick.get().is_some() {
             menu_open.set(None);
             deploy_pick.set(None);
@@ -114,6 +127,20 @@ pub fn App() -> impl IntoElement {
             return false;
         }
         true
+    });
+
+    // Los cuadros de lo que se anima en un hilo (el texto que llega, el brillo, el cursor): solo
+    // mientras algo en pantalla los pide.
+    spawn(async move {
+        loop {
+            timer(Duration::from_millis(40)).await;
+            if live::wants_frame() {
+                let t = global::<live::Tick>().get().0;
+                global::<live::Tick>().set(live::Tick(t.wrapping_add(1)));
+            } else {
+                timer(Duration::from_millis(120)).await;
+            }
+        }
     });
 
     // Arranque y ciclo: identidad → (pendiente: esperar) → sincronizar cada 2 s.
@@ -217,9 +244,9 @@ pub fn App() -> impl IntoElement {
                     None => {}
                 }
                 tick.set(tick.get().wrapping_add(1));
-                // Cada 2 s; cada medio segundo mientras algo de este teléfono espera respuesta, y enseguida
+                // Cada 2 s; cada medio segundo mientras algo de este teléfono espera respuesta o un agente escribe, y enseguida
                 // al mandar algo (`kick`).
-                let busy = threads.get().iter().any(|t| t.waiting) || incidents.get().iter().any(|i| i.waiting) || approvals.get().iter().any(|a| a.pending) || pending_thread.get().is_some();
+                let busy = threads.get().iter().any(|t| t.waiting || t.items.iter().any(|i| i["live"] == true)) || incidents.get().iter().any(|i| i.waiting) || approvals.get().iter().any(|a| a.pending) || pending_thread.get().is_some();
                 let steps = if busy { 2 } else { 8 };
                 for _ in 0..steps {
                     if kick.get() {
@@ -376,7 +403,10 @@ pub fn App() -> impl IntoElement {
                     _ => None,
                 })
                 .collect();
-            thread_files.set(vec![]);
+            // Solo si había: vaciar una lista vacía vuelve a dibujar el campo y le quita el foco.
+            if !thread_files.get().is_empty() {
+                thread_files.set(vec![]);
+            }
             app_owner.run(|| spawn(async move {
                 if let Some(Err(e)) = with_phone(&slot, move |p| p.thread_send_with(&id, &text, &files)).await {
                     status.set(format!("Couldn't send: {e}"));
@@ -428,6 +458,7 @@ pub fn App() -> impl IntoElement {
             decide: decide_rc.clone(),
             reply: thread_reply,
             catalog,
+            close: close_thread.clone(),
             photo: std::rc::Rc::new(move || {
                 let add = add_photo.clone();
                 app_owner.run(|| spawn(async move {
@@ -852,7 +883,8 @@ pub fn App() -> impl IntoElement {
             .border_b_1()
             .border_color(c(tokens::CARD_BORDER))
             .bg(c(tokens::GROUND))
-            .child(view().w(px(10.0)).h(px(10.0)).bg(c(tokens::ACCENT)))
+            // La marca de Condx al lado del nombre.
+            .child(theme::icon(theme::CONDX_MARK, tokens::ACCENT, 20.0))
             .child(text("Condx").text_size(px(15.0)).font_weight(FontWeight::MEDIUM))
             .child(view().flex_1())
             .child(dynamic(move || {
@@ -897,7 +929,19 @@ pub fn App() -> impl IntoElement {
                     .flex_1()
                     // El código a pantalla completa, encima de todo (`md::fullscreen`).
                     .child(md::fullscreen())
-                    .child(top_bar())
+                    // Dentro de un hilo la barra no ocupa lugar (el hilo tiene su cabecera); solo
+                    // aparece una línea si la sincronización no anda.
+                    .child(dynamic(move || {
+                        if thread_open.get().is_none() {
+                            return top_bar().into_element();
+                        }
+                        let line = sync_line.get();
+                        if line == "in sync" || line.is_empty() {
+                            return view().into_element();
+                        }
+                        let health = if line == "offline" { Health::Bad } else { Health::Warn };
+                        view().flex_row().items_center().px_4().h(px(24.0)).bg(c(tokens::GROUND)).child(status_tag(health, line)).into_element()
+                    }))
                     .child(
                         view()
                             .flex_1()
@@ -929,15 +973,16 @@ pub fn App() -> impl IntoElement {
                                         view()
                                             .p_4()
                                             .gap_3()
-                                            // Pestañas: un control segmentado compacto, con lo que espera en cada una.
+                                            // Pestañas: un control segmentado compacto, con lo que espera en cada una; los hilos primero
+                                            // (se abre en ellos).
                                             .child(dynamic(move || {
                                                 let open = incidents.get().iter().filter(|i| i.status == "open").count();
                                                 let busy = threads.get().iter().filter(|t| t.waiting_answer || t.status == "waiting-approval").count();
                                                 let t = tab.get();
                                                 theme::segmented(vec![
+                                                    ("Threads", busy, t == "threads", Box::new(move || tab.set("threads"))),
                                                     ("Approvals", waiting_count.get(), t == "approvals", Box::new(move || tab.set("approvals"))),
                                                     ("Incidents", open, t == "incidents", Box::new(move || tab.set("incidents"))),
-                                                    ("Threads", busy, t == "threads", Box::new(move || tab.set("threads"))),
                                                 ])
                                                 .into_element()
                                             }))
@@ -1033,9 +1078,9 @@ pub fn App() -> impl IntoElement {
                                             .absolute()
                                             .right(px(20.0))
                                             .bottom(px(24.0))
-                                            .w(px(56.0))
-                                            .h(px(56.0))
-                                            .rounded(px(28.0))
+                                            .w(px(46.0))
+                                            .h(px(46.0))
+                                            .rounded(px(23.0))
                                             .items_center()
                                             .justify_center()
                                             .bg(c(tokens::ACCENT))
@@ -1046,19 +1091,28 @@ pub fn App() -> impl IntoElement {
                                                 thread_files.set(vec![]);
                                                 thread_open.set(Some("_new".into()));
                                             })
-                                            .child(theme::icon(theme::PLUS, tokens::ON_ACCENT, 26.0))
+                                            .child(theme::icon(theme::PLUS, tokens::ON_ACCENT, 21.0))
                                             .into_element()
                                     }))
                                     // Un hilo abierto: el chat a pantalla completa, encima.
                                     .child(dynamic({
                                         let send_thread = send_thread.clone();
                                         let composer = composer.clone();
+                                        // Solo al abrir o cerrar un hilo se vuelve a montar; lo que llega
+                                        // del hilo lo lee la pantalla (así el campo no pierde el foco).
                                         move || {
-                                            let t = (tab.get() == "threads").then(|| thread_open.get()).flatten().and_then(|id| if id == "_new" { Some(new_thread.get().unwrap_or_else(|| Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, result: None, waiting: false, sending: None })) } else { threads.get().into_iter().find(|t| t.id == id) });
-                                            match t {
-                                                Some(t) => view().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).child(chat::screen(t, thread_open, thread_text, send_thread.clone(), composer.clone())).into_element(),
-                                                None => view().into_element(),
-                                            }
+                                            let Some(id) = (tab.get() == "threads").then(|| thread_open.get()).flatten() else { return view().into_element() };
+                                            let current: std::rc::Rc<dyn Fn() -> Option<Thread>> = {
+                                                let id = id.clone();
+                                                std::rc::Rc::new(move || {
+                                                    if id == "_new" {
+                                                        Some(new_thread.get().unwrap_or_else(|| Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result: None, waiting: false, sending: None }))
+                                                    } else {
+                                                        threads.get().into_iter().find(|t| t.id == id)
+                                                    }
+                                                })
+                                            };
+                                            view().absolute().top(px(0.0)).left(px(0.0)).right(px(0.0)).bottom(px(0.0)).child(chat::screen(id, current, thread_text, send_thread.clone(), composer.clone())).into_element()
                                         }
                                     }))
                                     .into_element(),

@@ -7,7 +7,9 @@ use nsh_core::ui::prelude::*;
 use serde_json::Value;
 
 use std::rc::Rc;
+use std::time::Duration;
 
+use crate::live;
 use crate::sync::{Approval, Thread};
 use crate::theme::{self, c, muted, now, tokens, Health};
 
@@ -18,6 +20,49 @@ pub fn thread_health(status: &str) -> Health {
         "failed" | "stopped" => Health::Bad,
         _ => Health::Unknown,
     }
+}
+
+/// El estado real de un hilo, en una palabra y su color: lo que pasa ahora (un agente trabaja, algo
+/// espera en cola, te toca) antes que cómo terminó lo último.
+pub fn state_of(t: &Thread) -> (Health, &'static str) {
+    if t.items.iter().any(|i| i["status"] == "queued") {
+        return (Health::Warn, "Queued");
+    }
+    if t.items.iter().any(|i| i["live"] == true) || t.status == "running" {
+        return (Health::Warn, "Working");
+    }
+    if t.waiting_answer || t.status == "waiting-answer" {
+        return (Health::Warn, "Needs your answer");
+    }
+    match t.status.as_str() {
+        "waiting-approval" => (Health::Warn, "Needs your approval"),
+        "done" => (Health::Ok, "Replied"),
+        "succeeded" => (Health::Ok, "Done"),
+        "failed" => (Health::Bad, "Failed"),
+        "stopped" => (Health::Bad, "Stopped"),
+        "cancelled" => (Health::Unknown, "Cancelled"),
+        _ => (Health::Unknown, "New"),
+    }
+}
+
+/// En qué proyecto y entorno trabaja el hilo: «heskala-erp · dev» (producción en rojo).
+fn where_tag(t: &Thread) -> AnyElement {
+    let label = match (&t.project, &t.env) {
+        (Some(p), Some(e)) => format!("{p} · {e}"),
+        (Some(p), None) => p.clone(),
+        (None, Some(e)) => e.clone(),
+        (None, None) => return view().into_element(),
+    };
+    let prod = t.env.as_deref().is_some_and(|e| e.contains("prod"));
+    text(label).number_of_lines(1u32).text_size(px(11.5)).font_family(theme::MONO_FONT).text_color(c(if prod { tokens::DANGER } else { tokens::SUBTLE })).into_element()
+}
+
+/// Qué hace ahora el agente que trabaja en el hilo («Reviewer · Reading the code…»), si hay uno.
+fn activity_of(t: &Thread) -> Option<String> {
+    let it = t.items.iter().rev().find(|i| i["live"] == true)?;
+    let who = it["author"].as_str().unwrap_or("Agent");
+    let doing = if it["text"].as_str().is_some_and(|s| !s.trim().is_empty()) && it["activity"] == "Thinking…" { "Writing…" } else { it["activity"].as_str().unwrap_or("Thinking…") };
+    Some(format!("{who} · {doing}"))
 }
 
 pub fn thread_state(t: &Thread) -> String {
@@ -66,6 +111,8 @@ pub struct Composer {
     pub mic: Rc<dyn Fn()>,
     /// Termina la grabación: `true` la manda, `false` la descarta.
     pub stop: Rc<dyn Fn(bool)>,
+    /// Vuelve a la lista (cierra el teclado antes).
+    pub close: Rc<dyn Fn()>,
 }
 
 fn file_icon(kind: &str) -> &'static str {
@@ -255,6 +302,23 @@ fn face(name: &str, logo: &str, size: f32) -> AnyElement {
 
 /// Los agentes de un hilo, uno detrás de otro (hasta tres): con más de uno se apilan con un borde del
 /// color del fondo; con uno, su avatar solo; sin ninguno, la inicial del título.
+/// Los de un hilo en una fila, para la lista: hasta dos caras chicas un poco encimadas y «+N».
+fn faces_inline(t: &Thread, size: f32) -> AnyElement {
+    let people: Vec<(String, String)> = t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect();
+    if people.is_empty() {
+        return avatar(&t.title, size).into_element();
+    }
+    let mut row = view().flex_row().items_center().flex_shrink_0();
+    for (ix, (name, logo)) in people.iter().take(2).enumerate() {
+        let ring = view().w(px(size + 2.0)).h(px(size + 2.0)).rounded(px(size / 2.0 + 1.0)).items_center().justify_center().bg(c(tokens::CARD)).child(face(name, logo, size));
+        row = row.child(if ix == 0 { ring } else { ring.ml(px(-size * 0.35)) });
+    }
+    if people.len() > 2 {
+        row = row.child(text(format!("+{}", people.len() - 2)).text_size(px(11.0)).text_color(c(tokens::SUBTLE)).ml(px(3.0)));
+    }
+    row.into_element()
+}
+
 fn faces(t: &Thread, size: f32) -> AnyElement {
     let people: Vec<(String, String)> = t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect();
     // El mismo cuadro que un avatar solo: con más de un agente, dos más chicos en diagonal (el
@@ -328,6 +392,39 @@ fn short_ago(ms: i64) -> String {
 }
 
 /// El texto de un agente: la prosa arriba y los campos de su resultado (`clave: valor`) como filas.
+/// Lo que el agente escribe ahora: el texto aparece a su paso con el cursor al final; sin texto
+/// todavía (o mientras usa una herramienta), qué hace, con un brillo que lo recorre.
+fn live_body(name: &str, it: &Value) -> AnyElement {
+    let text_now = it["text"].as_str().unwrap_or("").to_string();
+    let activity = it["activity"].as_str().unwrap_or("Thinking…").to_string();
+    let key = format!("{name}:{}", it["at"]);
+    let thinking = activity == "Thinking…";
+    dynamic(move || {
+        global::<live::Tick>().get();
+        let shown = live::revealed(&key, &text_now);
+        let mut col = view().gap(px(6.0));
+        if !shown.is_empty() {
+            col = col.child(view().px_3().py(px(10.0)).rounded(px(14.0)).rounded_tl(px(4.0)).bg(c(tokens::HOVER)).child(agent_body(&format!("{shown}{}", live::CARET))));
+        }
+        // Escribiendo: el cursor basta; pensando o con una herramienta, se dice qué hace.
+        if shown.is_empty() || !thinking {
+            col = col.child(view().pl(px(2.0)).child(live::shimmer(&activity, 13.5)));
+        }
+        col.into_element()
+    })
+    .into_element()
+}
+
+/// Baja al último mensaje si se sigue el final; si no, vuelve a donde se estaba leyendo (el hilo se
+/// vuelve a armar en cada sincronización).
+fn follow(scroller: ElementRef, animated: bool) {
+    if live::following() {
+        scroller.scroll_to_end(animated);
+    } else {
+        scroller.scroll_to(Point { x: Points(0.0), y: Points(live::offset()) }, false);
+    }
+}
+
 fn agent_body(body: &str) -> View {
     let mut prose: Vec<String> = Vec::new();
     let mut fields: Vec<(String, String)> = Vec::new();
@@ -437,7 +534,12 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                         .border_color(c(tokens::USER_BUBBLE_BORDER))
                         .child(bubble_inner.child(user_text(&body))),
                 )
-                .child(text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE)));
+                // En cola: sale cuando un agente termina (ya trabajan tantos como el límite).
+                .child(if it["status"] == "queued" {
+                    text("Queued · goes out when an agent is free").text_size(px(11.0)).text_color(c(tokens::WARNING)).into_element()
+                } else {
+                    text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE)).into_element()
+                });
             let to = Some((None, "you".to_string(), snippet));
             let long = to.clone();
             swipe_to_reply(bubble.on_long_press(move || reply.set(long.clone())), reply, to).into_element()
@@ -448,33 +550,33 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
             let handle = handles.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(&name)).map(|(_, h, _)| h.clone());
             let logo = it["logo"].as_str().map(str::to_string).or_else(|| handles.iter().find(|(n, _, _)| n.eq_ignore_ascii_case(&name)).map(|(_, _, l)| l.clone())).unwrap_or_default();
             let snippet: String = body.lines().find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("```")).unwrap_or("").replace("**", "").replace('`', "").chars().take(90).collect();
+            // El avatar pequeño junto al nombre y la burbuja debajo, a todo el ancho (sin la columna
+            // vacía bajo el avatar).
             let bubble = view()
-                .flex_row()
-                .gap_2()
+                .gap(px(6.0))
                 .pr(px(24.0))
-                .child(face(&name, &logo, 30.0))
                 .child(
                     view()
-                        .flex_1()
-                        .gap_1()
-                        .child(
-                            view()
-                                .flex_row()
-                                .gap_2()
-                                .items_center()
-                                .child(text(name.clone()).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
-                                // Un agente de fuera (por el MCP): lo que dice es suyo, no de Condx.
-                                .child(if external { view().px(px(5.0)).h(px(16.0)).justify_center().rounded(px(4.0)).border_1().border_color(c(tokens::CARD_BORDER)).child(text("external").text_size(px(10.0)).text_color(c(tokens::MUTED))).into_element() } else { view().into_element() })
-                                .child(text(short_ago(at)).text_size(px(11.0)).text_color(c(tokens::SUBTLE))),
-                        )
-                        .child(view().px_3().py(px(10.0)).rounded(px(14.0)).rounded_tl(px(4.0)).bg(c(tokens::HOVER)).child(agent_body(&body))),
-                );
+                        .flex_row()
+                        .gap_2()
+                        .items_center()
+                        .child(face(&name, &logo, 16.0))
+                        .child(text(name.clone()).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                        // Un agente de fuera (por el MCP): lo que dice es suyo, no de Condx.
+                        .child(if external { view().px(px(5.0)).h(px(16.0)).justify_center().rounded(px(4.0)).border_1().border_color(c(tokens::CARD_BORDER)).child(text("external").text_size(px(10.0)).text_color(c(tokens::MUTED))).into_element() } else { view().into_element() })
+                        .child(text(short_ago(at)).text_size(px(11.0)).text_color(c(tokens::SUBTLE))),
+                )
+                .child(if it["live"] == true {
+                    live_body(&name, it)
+                } else {
+                    view().px_3().py(px(10.0)).rounded(px(14.0)).rounded_tl(px(4.0)).bg(c(tokens::HOVER)).child(agent_body(&body)).into_element()
+                });
             // Mantener presionado también responde; con código adentro es la única forma (el gesto
-            // lateral es del código, que se desplaza).
+            // lateral es del código o de la tabla, que se desplazan).
             let to = Some((handle, name, snippet));
             let long = to.clone();
             let bubble = bubble.on_long_press(move || reply.set(long.clone()));
-            if body.contains("```") {
+            if body.contains("```") || crate::md::has_table(&body) {
                 bubble.into_element()
             } else {
                 swipe_to_reply(bubble, reply, to).into_element()
@@ -562,41 +664,41 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
                 format!("{who}{}", line.replace("**", "").replace('`', "").trim_start_matches("#").trim())
             })
             .unwrap_or_default();
-        let attention = t.waiting_answer || t.status == "waiting-approval";
+        let (health, state) = state_of(&t);
+        let queued = t.items.iter().filter(|i| i["status"] == "queued").count();
+        let activity = activity_of(&t);
+        // Sin columna para el avatar: chico, al lado del título; abajo el estado y dónde trabaja, y lo
+        // último (o lo que hace ahora el agente, con el brillo).
         let mut row = view()
-            .flex_row()
-            .gap_3()
+            .gap(px(5.0))
             .px_3()
-            .py(px(12.0))
+            .py(px(11.0))
             .bg(c(tokens::CARD))
             .active(|s| s.bg(c(tokens::ACTIVE)))
             .on_press(move || {
                 text_sig.set(String::new());
+                live::reset_follow();
                 open.set(Some(id.clone()));
             })
-            .child(faces(&t, 38.0))
             .child(
                 view()
-                    .flex_1()
-                    .gap(px(3.0))
-                    .child(
-                        view()
-                            .flex_row()
-                            .gap_2()
-                            .items_center()
-                            .child(view().flex_1().child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
-                            .child(text(short_ago(t.updated_at)).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
-                    )
-                    .child(
-                        view()
-                            .flex_row()
-                            .gap_2()
-                            .items_center()
-                            .child(theme::dot(thread_health(&t.status)))
-                            .child(text(thread_state(&t)).text_size(px(12.0)).text_color(c(if attention { tokens::WARNING } else { tokens::MUTED }))),
-                    )
-                    .child(text(preview).number_of_lines(2u32).text_size(px(13.0)).line_height(px(18.0)).text_color(c(tokens::MUTED))),
-            );
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .child(faces_inline(&t, 18.0))
+                    .child(view().flex_1().child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
+                    .child(text(short_ago(t.updated_at)).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
+            )
+            .child(view().flex_row().gap_2().items_center().child(theme::pill(health, state)).child(view().flex_1().child(where_tag(&t))))
+            .child(match (activity, queued) {
+                (Some(doing), _) => dynamic(move || {
+                    global::<live::Tick>().get();
+                    live::shimmer(&doing, 13.0).into_element()
+                })
+                .into_element(),
+                (None, n) if n > 0 => text(if n == 1 { "1 message waits for a free agent".to_string() } else { format!("{n} messages wait for a free agent") }).text_size(px(13.0)).text_color(c(tokens::MUTED)).into_element(),
+                _ => text(preview).number_of_lines(2u32).text_size(px(13.0)).line_height(px(18.0)).text_color(c(tokens::MUTED)).into_element(),
+            });
         if ix + 1 < n {
             row = row.border_b_1().border_color(c(tokens::CARD_BORDER));
         }
@@ -606,12 +708,18 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
 }
 
 /// Un hilo abierto: cabecera con volver, los mensajes (bajan solos al final) y el campo fijo abajo.
-pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>, send: impl Fn(String, String) + Clone + 'static, composer: Composer) -> View {
+/// Los que están en el hilo: (nombre, @handle, marca).
+fn handles_of(t: &Thread) -> Vec<(String, String, String)> {
+    t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["node"].as_str()?.trim_start_matches("g-").to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect()
+}
+
+/// Un hilo abierto. Se monta una vez por hilo: lo que cambia con cada sincronización (la cabecera,
+/// los mensajes, los chips) se vuelve a dibujar solo, y el campo queda montado (no pierde el foco ni
+/// cierra el teclado mientras un agente escribe o al mandar).
+pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Signal<String>, send: impl Fn(String, String) + Clone + 'static, composer: Composer) -> View {
+    let owner = Owner::current();
     let (approvals, decide, reply) = (composer.approvals, composer.decide.clone(), composer.reply);
-    let handles: Vec<(String, String, String)> = t.participants.iter().filter_map(|p| Some((p["name"].as_str()?.to_string(), p["node"].as_str()?.trim_start_matches("g-").to_string(), p["logo"].as_str().unwrap_or("").to_string()))).collect();
     let scroller = element_ref();
-    let last_question = t.items.iter().rposition(|i| i["kind"] == "question");
-    let id = t.id.clone();
     let quick = {
         let (send, id) = (send.clone(), id.clone());
         move |label: &'static str| -> View {
@@ -628,72 +736,118 @@ pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>,
                 .child(text(label).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
         }
     };
-    let mut items = view().gap(px(14.0)).px_4().py_4();
-    if t.id == "_new" && t.sending.is_none() {
-        items = items.child(
-            view().items_center().gap_2().py(px(40.0)).px_4().child(text("Start a conversation").text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
-                text("Ask the agents about your project: they read your code and what Condx knows (environments, jobs, incidents, flows). You can attach a photo or send a voice note.")
-                    .text_size(px(13.0))
-                    .line_height(px(19.0))
-                    .text_center()
-                    .text_color(c(tokens::MUTED)),
-            ),
-        );
-    }
-    for (ix, it) in t.items.iter().enumerate().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
-        items = items.child(message(it, Some(ix) == last_question && t.waiting_answer, &quick, approvals, &decide, reply, &handles));
-    }
-    // Lo que acabas de mandar, al instante, hasta que el daemon lo contesta.
-    if let Some(pending) = t.sending.clone() {
-        items = items.child(
-            view()
-                .items_end()
-                .pl(px(56.0))
-                .gap_1()
-                .opacity(0.75)
-                .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
-                .child(text("Sending…").text_size(px(11.0)).text_color(c(tokens::SUBTLE))),
-        );
-    }
-    if t.status == "running" && !t.items.last().is_some_and(|i| i["status"] == "running") {
-        items = items.child(view().flex_row().gap_2().items_center().child(theme::dot(Health::Warn)).child(muted("Working…")));
-    }
-
-    // Lo que hizo el daemon con tu último mensaje.
-    let delivery = match (&t.result, t.waiting) {
-        (_, true) => None,
-        (Some(r), false) if r.starts_with("rejected") => Some((Health::Bad, format!("Couldn't deliver it: {}", r.trim_start_matches("rejected: ")))),
-        // Entregado: ya se ve en el hilo, no hace falta decirlo.
-        (Some(_), false) => None,
-        _ => None,
-    };
-    let placeholder: &'static str = if t.waiting_answer { "Answer the question…" } else { "Message the agents…" };
-    let mut chips = view().flex_row().gap_2().px_3().pt_2();
-    // Los del hilo y, después, los del catálogo que no están (se los llama con @ y entran a leer y responder).
-    let mut people: Vec<(String, String, String, bool)> = handles.iter().map(|(n, h, l)| (n.clone(), h.clone(), l.clone(), true)).collect();
-    for (id, name, logo) in composer.catalog.get() {
-        if !people.iter().any(|(n, h, _, _)| h.eq_ignore_ascii_case(&id) || n.eq_ignore_ascii_case(&name)) {
-            people.push((name, id, logo, false));
+    let body = {
+        let current = current.clone();
+        move || -> AnyElement {
+            let Some(t) = current() else { return view().into_element() };
+            let handles = handles_of(&t);
+            let last_question = t.items.iter().rposition(|i| i["kind"] == "question");
+            let mut items = view().gap(px(14.0)).px_4().py_4();
+            if t.id == "_new" && t.sending.is_none() {
+                items = items.child(
+                    view().items_center().gap_2().py(px(40.0)).px_4().child(text("Start a conversation").text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
+                        text("Ask the agents about your project: they read your code and what Condx knows (environments, jobs, incidents, flows). You can attach a photo or send a voice note.")
+                            .text_size(px(13.0))
+                            .line_height(px(19.0))
+                            .text_center()
+                            .text_color(c(tokens::MUTED)),
+                    ),
+                );
+            }
+            for (ix, it) in t.items.iter().enumerate().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
+                items = items.child(message(it, Some(ix) == last_question && t.waiting_answer, &quick, approvals, &decide, reply, &handles));
+            }
+            // Lo que acabas de mandar, al instante, hasta que el daemon lo contesta.
+            if let Some(pending) = t.sending.clone() {
+                items = items.child(
+                    view()
+                        .items_end()
+                        .pl(px(56.0))
+                        .gap_1()
+                        .opacity(0.75)
+                        .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
+                        .child(text("Sending…").text_size(px(11.0)).text_color(c(tokens::SUBTLE))),
+                );
+            }
+            // Con un agente escribiendo, su burbuja ya dice que trabaja.
+            if t.status == "running" && !t.items.last().is_some_and(|i| i["status"] == "running" || i["live"] == true) {
+                items = items.child(view().flex_row().gap_2().items_center().child(theme::dot(Health::Warn)).child(muted("Working…")));
+            }
+            items.on_layout(move |_: &Bounds<Points>| follow(scroller, true)).into_element()
         }
-    }
-    for (name, handle, logo, member) in people {
-        chips = chips.child(
+    };
+    let placeholder = {
+        let current = current.clone();
+        move || if current().is_some_and(|t| t.waiting_answer) { "Answer the question…".to_string() } else { "Message the agents…".to_string() }
+    };
+    // El campo de escribir: los chips de agentes lo enfocan y ponen el cursor al final.
+    let field = element_ref();
+    let close = composer.close.clone();
+    let remount = signal(0u32);
+    // Los chips de a quién mencionar y qué pasó con lo último que mandaste (cambian con el hilo).
+    let chips_row = {
+        let current = current.clone();
+        let catalog = composer.catalog;
+        move || -> AnyElement {
+            let Some(t) = current() else { return view().into_element() };
+            let mut chips = view().flex_row().gap_2().px_3().pt_2();
+            // Los del hilo y, después, los del catálogo que no están (se los llama con @ y entran a leer y responder).
+            let mut people: Vec<(String, String, String, bool)> = handles_of(&t).iter().map(|(n, h, l)| (n.clone(), h.clone(), l.clone(), true)).collect();
+            for (id, name, logo) in catalog.get() {
+                if !people.iter().any(|(n, h, _, _)| h.eq_ignore_ascii_case(&id) || n.eq_ignore_ascii_case(&name)) {
+                    people.push((name, id, logo, false));
+                }
+            }
+            for (name, handle, logo, member) in people {
+                chips = chips.child(
+                    view()
+                        .flex_row()
+                        .gap(px(6.0))
+                        .items_center()
+                        .pl(px(4.0))
+                        .pr(px(10.0))
+                        .h(px(28.0))
+                        .rounded(px(14.0))
+                        .border_1()
+                        .border_color(c(tokens::CARD_BORDER))
+                        .active(|s| s.bg(c(tokens::ACTIVE)))
+                        .on_press(move || {
+                            // A quién va: la mención al principio (reemplaza otra si ya había), sin borrar
+                            // lo escrito; el campo queda con el cursor al final y el teclado abierto.
+                            // Con una palabra a medio componer el teclado retiene el valor nuevo hasta que
+                            // termina (y soltar el foco no basta): el campo se vuelve a montar con el texto.
+                            let cur = text_sig.get();
+                            let rest = if cur.starts_with('@') { cur.split_once(char::is_whitespace).map(|(_, r)| r.to_string()).unwrap_or_default() } else { cur };
+                            let next = format!("@{handle} {}", rest.trim_start());
+                            let end = next.encode_utf16().count() as u32;
+                            text_sig.set(next);
+                            remount.set(remount.get() + 1);
+                            owner.run(|| {
+                                spawn(async move {
+                                    timer(Duration::from_millis(60)).await;
+                                    field.focus();
+                                    field.set_selection(end, end);
+                                })
+                            });
+                        })
+                        .child(face(&name, &logo, 20.0))
+                        .child(text(format!("@{name}")).text_size(px(12.5)).text_color(c(if member { tokens::FG } else { tokens::MUTED }))),
+                );
+            }
+            // Lo que hizo el daemon con tu último mensaje (entregado ya se ve en el hilo).
+            let delivery = match (&t.result, t.waiting) {
+                (Some(r), false) if r.starts_with("rejected") => Some((Health::Bad, format!("Couldn't deliver it: {}", r.trim_start_matches("rejected: ")))),
+                _ => None,
+            };
             view()
-                .flex_row()
-                .gap(px(6.0))
-                .items_center()
-                .pl(px(4.0))
-                .pr(px(10.0))
-                .h(px(28.0))
-                .rounded(px(14.0))
-                .border_1()
-                .border_color(c(tokens::CARD_BORDER))
-                .active(|s| s.bg(c(tokens::ACTIVE)))
-                .on_press(move || text_sig.set(format!("@{handle} ")))
-                .child(face(&name, &logo, 20.0))
-                .child(text(format!("@{name}")).text_size(px(12.5)).text_color(c(if member { tokens::FG } else { tokens::MUTED }))),
-        );
-    }
+                .child(if t.participants.is_empty() { view().into_element() } else { scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(chips).into_element() })
+                .child(match delivery {
+                    Some((h, label)) => view().px_4().pt_2().child(theme::status_tag(h, label)).into_element(),
+                    None => view().into_element(),
+                })
+                .into_element()
+        }
+    };
     let files = composer.files;
     let do_send = move || {
         let mut msg = text_sig.get().trim().to_string();
@@ -738,38 +892,88 @@ pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>,
                         .items_center()
                         .justify_center()
                         .active(|s| s.opacity(0.5))
-                        .on_press(move || {
-                            text_sig.set(String::new());
-                            open.set(None);
-                        })
+                        .on_press(move || close())
                         .child(text("‹").text_size(px(30.0)).text_color(c(tokens::FG))),
                 )
-                .child(if t.id == "_new" {
-                    view().w(px(4.0)).into_element()
-                } else {
-                    faces(&t, 32.0)
-                })
-                .child(
-                    view()
-                        .flex_1()
-                        .pl_2()
-                        .gap(px(2.0))
-                        .child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
-                        .child(if t.id == "_new" {
-                            text("The agents answer here").text_size(px(11.5)).text_color(c(tokens::MUTED)).into_element()
-                        } else {
-                            view().flex_row().gap_2().items_center().child(theme::dot(thread_health(&t.status))).child(text(thread_state(&t)).text_size(px(11.5)).text_color(c(tokens::MUTED))).into_element()
-                        }),
-                ),
+                .child(dynamic({
+                    let current = current.clone();
+                    move || {
+                        let Some(t) = current() else { return view().into_element() };
+                        view()
+                            .flex_1()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(if t.id == "_new" { view().w(px(4.0)).into_element() } else { faces(&t, 32.0) })
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .pl_2()
+                                    .gap(px(2.0))
+                                    .child(text(t.title.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                                    .child(if t.id == "_new" {
+                                        text("The agents answer here").text_size(px(11.5)).text_color(c(tokens::MUTED)).into_element()
+                                    } else {
+                                        {
+                                            let (health, state) = state_of(&t);
+                                            view().flex_row().gap_2().items_center().child(theme::dot(health)).child(text(state).text_size(px(11.5)).text_color(c(tokens::MUTED))).child(view().flex_1().child(where_tag(&t))).into_element()
+                                        }
+                                    }),
+                            )
+                            .into_element()
+                    }
+                })),
         )
-        // Al cambiar lo de adentro (llegó un mensaje, se abrió el teclado), baja al último.
-        .child(scroll().flex_1().element_ref(&scroller).on_layout(move |_: &Bounds<Points>| scroller.scroll_to_end(false)).child(items.on_layout(move |_: &Bounds<Points>| scroller.scroll_to_end(true))))
-        // El campo, fijo abajo: a quién mencionar, qué pasó con lo último y escribir.
+        // Al cambiar lo de adentro (llegó un mensaje, se abrió el teclado), baja al último, salvo que
+        // se haya subido a leer: entonces queda donde estaba y aparece el botón para bajar.
         .child(
             view()
-                .border_t_1()
-                .border_color(c(tokens::CARD_BORDER))
-                .bg(c(tokens::GROUND))
+                .flex_1()
+                .child(
+                    scroll()
+                        .flex_1()
+                        .keyboard_taps(KeyboardTaps::Handled)
+                        .element_ref(&scroller)
+                        .on_scroll(move |e: &ScrollEvent| live::scrolled(f32::from(e.offset.y), f32::from(e.content_size.height), f32::from(e.size.height)))
+                        .on_layout(move |_: &Bounds<Points>| follow(scroller, false))
+                        .child(dynamic(body)),
+                )
+                .child(dynamic(move || {
+                    if !global::<live::ShowDown>().get().0 {
+                        return view().into_element();
+                    }
+                    view()
+                        .absolute()
+                        .left(px(0.0))
+                        .right(px(0.0))
+                        .bottom(px(12.0))
+                        .items_center()
+                        .child(
+                            view()
+                                .w(px(40.0))
+                                .h(px(40.0))
+                                .rounded(px(20.0))
+                                .items_center()
+                                .justify_center()
+                                .border_1()
+                                .border_color(c(tokens::CARD_BORDER))
+                                .bg(c(tokens::GROUND))
+                                .shadow_md()
+                                .active(|s| s.opacity(0.8))
+                                .on_press(move || {
+                                    live::scrolled(0.0, 0.0, 0.0);
+                                    scroller.scroll_to_end(true);
+                                })
+                                .child(theme::icon(theme::ARROW_DOWN, tokens::FG, 18.0)),
+                        )
+                        .into_element()
+                })),
+        )
+        // El campo, fijo abajo: a quién mencionar, qué pasó con lo último y escribir (una tarjeta
+        // flotante, como la de Claude).
+        .child(
+            view()
+                .pb_2()
                 // A qué se responde (deslizando un mensaje).
                 .child(dynamic(move || match reply.get() {
                     Some((_, name, snippet)) => view()
@@ -787,11 +991,7 @@ pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>,
                         .into_element(),
                     None => view().into_element(),
                 }))
-                .child(if t.participants.is_empty() { view().into_element() } else { scroll().horizontal().child(chips).into_element() })
-                .child(match delivery {
-                    Some((h, label)) => view().px_4().pt_2().child(theme::status_tag(h, label)).into_element(),
-                    None => view().into_element(),
-                })
+                .child(dynamic(chips_row))
                 // Los adjuntos del próximo mensaje (suben enseguida; × los quita).
                 .child(dynamic(move || {
                     let list = files.get();
@@ -812,7 +1012,7 @@ pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>,
                             ),
                         );
                     }
-                    scroll().horizontal().child(row).into_element()
+                    scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(row).into_element()
                 }))
                 // Qué adjuntar.
                 .child(dynamic({
@@ -850,19 +1050,24 @@ pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>,
                             .into_element()
                     }
                 }))
-                // Escribir, o la barra de la grabación mientras graba.
+                // Escribir, o la barra de la grabación mientras graba: la tarjeta con el texto arriba
+                // y los botones abajo.
                 .child(dynamic(move || {
+                    remount.get();
                     let (stop_send, stop_drop) = (composer.stop.clone(), composer.stop.clone());
+                    let card = view().mx_3().mt_2().px(px(10.0)).pt(px(8.0)).pb(px(8.0)).gap(px(6.0)).rounded(px(22.0)).border_1().border_color(c(tokens::CARD_BORDER)).bg(c(tokens::RAISED));
+                    let round = |size: f32| view().w(px(size)).h(px(size)).rounded(px(size / 2.0)).items_center().justify_center();
                     if let Some(secs) = composer.recording.get() {
-                        return view()
-                            .flex_row()
-                            .gap_3()
-                            .items_center()
-                            .px_3()
-                            .py_2()
-                            .child(view().w(px(42.0)).h(px(42.0)).rounded(px(21.0)).items_center().justify_center().active(|s| s.bg(c(tokens::ACTIVE))).on_press(move || stop_drop(false)).child(text("×").text_size(px(20.0)).text_color(c(tokens::MUTED))))
-                            .child(view().flex_1().flex_row().gap_2().items_center().child(view().w(px(10.0)).h(px(10.0)).rounded(px(5.0)).bg(c(tokens::DANGER))).child(text(format!("Recording · {}", clock(secs))).text_size(px(14.5)).text_color(c(tokens::FG))))
-                            .child(view().w(px(42.0)).h(px(42.0)).rounded(px(21.0)).items_center().justify_center().bg(c(tokens::ACCENT)).active(|s| s.opacity(0.8)).on_press(move || stop_send(true)).child(text("↑").text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(c(tokens::ON_ACCENT))))
+                        return card
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(round(38.0).border_1().border_color(c(tokens::CARD_BORDER)).active(|s| s.bg(c(tokens::ACTIVE))).on_press(move || stop_drop(false)).child(text("×").text_size(px(19.0)).text_color(c(tokens::MUTED))))
+                                    .child(view().flex_1().flex_row().gap_2().items_center().child(view().w(px(10.0)).h(px(10.0)).rounded(px(5.0)).bg(c(tokens::DANGER))).child(text(format!("Recording · {}", clock(secs))).text_size(px(14.5)).text_color(c(tokens::FG))))
+                                    .child(round(38.0).bg(c(tokens::ACCENT)).active(|s| s.opacity(0.8)).on_press(move || stop_send(true)).child(theme::icon(theme::ARROW_UP, tokens::ON_ACCENT, 20.0))),
+                            )
                             .into_element();
                     }
                     let do_send = do_send.clone();
@@ -870,64 +1075,46 @@ pub fn screen(t: Thread, open: Signal<Option<String>>, text_sig: Signal<String>,
                     let menu = composer.menu;
                     let ready = files.get().iter().any(|f| matches!(f.uploaded, Some(Ok(_))));
                     let uploading = files.get().iter().any(|f| f.uploaded.is_none());
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .items_end()
-                        .px_3()
-                        .py_2()
-                        .child(
-                            view()
-                                .w(px(36.0))
-                                .h(px(42.0))
-                                .items_center()
-                                .justify_center()
-                                .active(|s| s.opacity(0.5))
-                                .on_press(move || menu.set(!menu.get()))
-                                .child(text("+").text_size(px(26.0)).text_color(c(tokens::MUTED))),
-                        )
-                        .child(
-                            view().flex_1().child(
-                                input()
-                                    .value(move || text_sig.get())
-                                    .placeholder(placeholder)
-                                    .placeholder_color(move || now(tokens::SUBTLE))
-                                    .selection_color(move || now(tokens::ACCENT))
-                                    .on_change(move |s: &str| text_sig.set(s.to_string()))
-                                    // Varias líneas: Enter agrega una línea; se manda con el botón.
-                                    .multiline(true)
-                                    .px_4()
-                                    .py(px(10.0))
-                                    .min_h(px(42.0))
-                                    .max_h(px(140.0))
-                                    .rounded(px(21.0))
-                                    .border_1()
-                                    .border_color(c(tokens::CARD_BORDER))
-                                    .bg(c(tokens::PANEL))
-                                    .text_color(c(tokens::FG))
-                                    .text_size(px(14.5))
-                                    .font_family(theme::UI_FONT),
-                            ),
-                        )
-                        // Enviar; con el campo vacío y nada adjunto, grabar una nota de voz.
-                        .child(dynamic(move || {
-                            let empty = text_sig.get().trim().is_empty() && !ready;
-                            let can = !empty && !uploading;
-                            let (do_send, mic) = (do_send.clone(), mic.clone());
-                            let voice = empty && crate::audio::supported();
-                            view()
-                                .w(px(42.0))
-                                .h(px(42.0))
-                                .rounded(px(21.0))
-                                .items_center()
-                                .justify_center()
-                                .bg(c(if can { tokens::ACCENT } else { tokens::HOVER }))
-                                .active(|s| s.opacity(0.8))
-                                .on_press(move || if voice { mic() } else { do_send() })
-                                .child(if voice { theme::mic_icon(tokens::MUTED, 22.0).into_element() } else { text("↑").text_size(px(20.0)).font_weight(FontWeight::SEMIBOLD).text_color(c(if can { tokens::ON_ACCENT } else { tokens::SUBTLE })).into_element() })
-                                .into_element()
-                        }))
-                        .into_element()
+                    card.child(
+                        input()
+                            .element_ref(&field)
+                            .value(move || text_sig.get())
+                            .placeholder(placeholder.clone())
+                            .placeholder_color(move || now(tokens::SUBTLE))
+                            .selection_color(move || now(tokens::ACCENT))
+                            .on_change(move |s: &str| text_sig.set(s.to_string()))
+                            // Varias líneas: Enter agrega una línea; se manda con el botón.
+                            .multiline(true)
+                            .px(px(6.0))
+                            .py(px(4.0))
+                            .min_h(px(36.0))
+                            .max_h(px(160.0))
+                            .text_color(c(tokens::FG))
+                            .text_size(px(15.0))
+                            .font_family(theme::UI_FONT),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .items_center()
+                            .child(round(38.0).border_1().border_color(c(tokens::CARD_BORDER)).active(|s| s.bg(c(tokens::ACTIVE))).on_press(move || menu.set(!menu.get())).child(theme::icon(theme::PLUS, tokens::MUTED, 20.0)))
+                            .child(view().flex_1())
+                            // Enviar; con el campo vacío y nada adjunto, grabar una nota de voz.
+                            .child(dynamic(move || {
+                                let empty = text_sig.get().trim().is_empty() && !ready;
+                                let can = !empty && !uploading;
+                                let (do_send, mic) = (do_send.clone(), mic.clone());
+                                let voice = empty && crate::audio::supported();
+                                round(38.0)
+                                    .bg(c(if voice { tokens::HOVER } else if can { tokens::ACCENT } else { tokens::HOVER }))
+                                    .active(|s| s.opacity(0.8))
+                                    .on_press(move || if voice { mic() } else { do_send() })
+                                    .child(if voice { theme::mic_icon(tokens::MUTED, 20.0).into_element() } else { theme::icon(theme::ARROW_UP, if can { tokens::ON_ACCENT } else { tokens::SUBTLE }, 20.0).into_element() })
+                                    .into_element()
+                            })),
+                    )
+                    .into_element()
                 })),
         )
 }

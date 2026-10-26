@@ -77,6 +77,9 @@ pub struct Thread {
     /// `[{node, name}]`: a quién se le puede escribir con `@node`.
     pub participants: Vec<Value>,
     pub waiting_answer: bool,
+    /// En qué proyecto y entorno trabaja (el entorno, si es de un incidente o un flujo).
+    pub project: Option<String>,
+    pub env: Option<String>,
     pub result: Option<String>,
     pub waiting: bool,
     /// Lo que este teléfono mandó y todavía no contestó el daemon (se muestra al instante).
@@ -408,6 +411,8 @@ impl Phone {
                     items: json_list(v, "items"),
                     participants: json_list(v, "participants"),
                     waiting_answer: v.get("waitingAnswer").and_then(Value::as_bool).unwrap_or(false),
+                    project: v.get("project").and_then(Value::as_str).map(str::to_string),
+                    env: v.get("env").and_then(Value::as_str).map(str::to_string),
                     result: v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string),
                     waiting: own && (r.pending || !answered),
                     sending: v.get("requestArg").and_then(Value::as_str).filter(|_| own && (r.pending || !answered)).map(str::to_string),
@@ -438,7 +443,7 @@ impl Phone {
             result = v.get("result").and_then(Value::as_str).filter(|_| own && answered).map(str::to_string);
             sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
         }
-        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, result, waiting, sending }
+        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending }
     }
 
     /// El catálogo de agentes que publica el daemon (fila `_agents`): (id, nombre, marca del proveedor).

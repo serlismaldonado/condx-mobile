@@ -49,6 +49,8 @@ pub mod tokens {
     pub const SYN_STRING: (u32, u32) = tone(0x15803d, 0x86d9a0);
     pub const SYN_NUMBER: (u32, u32) = tone(0xb45309, 0xf5b44a);
     /// Lo que escribe la persona en un hilo: el amarillo de la marca, apenas (sutil, no compite).
+    /// Lo que flota sobre el contenido (el campo de escribir).
+    pub const RAISED: (u32, u32) = tone(0xffffff, 0x262626);
     pub const USER_BUBBLE: (u32, u32) = tone(0xfdf4dc, 0x342d1c);
     pub const USER_BUBBLE_BORDER: (u32, u32) = tone(0xf0dda8, 0x4d4124);
     /// Para distinguir agentes (la inicial en el chat).
@@ -88,6 +90,17 @@ pub fn dot(health: Health) -> impl IntoElement {
 /// Estado como punto de color y texto apagado.
 pub fn status_tag(health: Health, label: impl Into<String>) -> impl IntoElement {
     view().flex_row().gap_2().items_center().child(dot(health)).child(text(label.into()).text_size(px(12.0)).text_color(c(tokens::MUTED)))
+}
+
+/// El estado de algo en una píldora de su color (punto, texto y borde).
+pub fn pill(health: Health, label: impl Into<String>) -> impl IntoElement {
+    let tone = match health {
+        Health::Ok => tokens::SUCCESS,
+        Health::Warn => tokens::WARNING,
+        Health::Bad => tokens::DANGER,
+        Health::Unknown => tokens::SUBTLE,
+    };
+    view().flex_row().gap(px(5.0)).items_center().px(px(7.0)).h(px(20.0)).rounded(px(10.0)).border_1().border_color(c(tone)).child(dot(health)).child(text(label.into()).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(tone)))
 }
 
 /// Tipo de entorno: texto pequeño con borde; solo producción lleva color.
@@ -322,6 +335,11 @@ pub fn icon(paths: &'static [&'static str], color: (u32, u32), size: f32) -> Can
 }
 
 pub const MIC: &[&str] = &["M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z", "M19 10v2a7 7 0 0 1-14 0v-2", "M12 19v3"];
+/// Enviar.
+pub const ARROW_UP: &[&str] = &["m5 12 7-7 7 7", "M12 19V5"];
+pub const ARROW_DOWN: &[&str] = &["M12 5v14", "m19 12-7 7-7-7"];
+/// La marca de Condx (assets/brand/mark.svg del repo condx).
+pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 1 0 0 6"];
 /// Agregar (un hilo nuevo).
 pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
 /// Escribir un mensaje nuevo (lápiz sobre un cuadrado).

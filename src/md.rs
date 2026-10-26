@@ -1,7 +1,8 @@
 //! Markdown de los agentes en el teléfono, con el estilo de la app de escritorio (`answer_view`):
-//! títulos, listas, citas, `código` en línea, **negrita**, *cursiva*, enlaces, y bloques de código
-//! con su lenguaje y colores (palabras clave, textos, números, comentarios). Nada se desborda: los
-//! bloques de código se desplazan de lado dentro de su caja y el resto se ajusta al ancho.
+//! títulos, listas, citas, `código` en línea, **negrita**, *cursiva*, enlaces, tablas, y bloques de
+//! código con su lenguaje y colores (palabras clave, textos, números, comentarios). Nada se desborda:
+//! los bloques de código y las tablas anchas se desplazan de lado dentro de su caja y el resto se
+//! ajusta al ancho.
 
 use nsh_core::ui::prelude::*;
 
@@ -14,7 +15,29 @@ enum Block {
     Bullet(String, String),
     Quote(String),
     Code(String, String),
+    /// Encabezado y filas.
+    Table(Vec<String>, Vec<Vec<String>>),
     Rule,
+}
+
+/// Las celdas de una fila de tabla (`| a | b |`), sin los bordes; `\|` es una barra dentro de la celda.
+fn cells(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.replace("\\|", "\u{1}").split('|').map(|c| c.trim().replace('\u{1}', "|")).collect()
+}
+
+/// La línea que separa el encabezado de una tabla: `|---|:---:|`.
+fn is_separator(line: &str) -> bool {
+    let cs = cells(line);
+    line.contains('-') && !cs.is_empty() && cs.iter().all(|c| !c.is_empty() && c.chars().all(|ch| matches!(ch, '-' | ':' | ' ')))
+}
+
+/// Una tabla de markdown, por si el bloque tiene que desplazarse de lado (el gesto de responder no va).
+pub fn has_table(src: &str) -> bool {
+    let lines: Vec<&str> = src.lines().collect();
+    lines.windows(2).any(|w| w[0].trim_start().starts_with('|') && is_separator(w[1]))
 }
 
 fn blocks(src: &str) -> Vec<Block> {
@@ -40,6 +63,18 @@ fn blocks(src: &str) -> Vec<Block> {
                 code.push(l.to_string());
             }
             out.push(Block::Code(lang.trim().to_string(), code.join("\n")));
+        } else if lead.starts_with('|') && lines.peek().is_some_and(|next| is_separator(next)) {
+            flush(&mut para, &mut out);
+            lines.next();
+            let head = cells(lead);
+            let mut rows = Vec::new();
+            while let Some(row) = lines.peek().filter(|l| l.trim_start().starts_with('|')) {
+                let mut r = cells(row);
+                r.resize(head.len(), String::new());
+                rows.push(r);
+                lines.next();
+            }
+            out.push(Block::Table(head, rows));
         } else if lead.is_empty() {
             flush(&mut para, &mut out);
         } else if let Some(h) = lead.strip_prefix("### ").or_else(|| lead.strip_prefix("#### ")) {
@@ -293,6 +328,42 @@ pub fn fullscreen() -> impl IntoElement {
 }
 
 /// La respuesta entera.
+/// Una tabla: columnas de ancho fijo según lo que llevan (el texto se ajusta dentro de la celda), el
+/// encabezado en negrita sobre un fondo, y de lado se desplaza si no entra.
+fn table(head: &[String], rows: &[Vec<String>], size: f32) -> View {
+    let plain = |s: &str| s.replace("**", "").replace('`', "").chars().count();
+    let widths: Vec<f32> = (0..head.len())
+        .map(|i| {
+            let longest = std::iter::once(&head[i]).chain(rows.iter().map(|r| &r[i])).map(|c| plain(c)).max().unwrap_or(0);
+            (longest as f32 * size * 0.56 + 20.0).clamp(64.0, 230.0)
+        })
+        .collect();
+    let row = |cells: &[String], header: bool, last: bool| {
+        let mut r = view().flex_row();
+        if header {
+            r = r.bg(c(tokens::PANEL));
+        }
+        if !last {
+            r = r.border_b_1().border_color(c(tokens::CARD_BORDER));
+        }
+        for (i, cell) in cells.iter().enumerate() {
+            let t = inline(cell, size - 1.0, tokens::FG);
+            r = r.child(view().w(px(widths[i])).px(px(10.0)).py(px(7.0)).child(if header { t.font_weight(FontWeight::SEMIBOLD) } else { t }));
+        }
+        r
+    };
+    let mut grid = view().child(row(head, true, rows.is_empty()));
+    for (ix, r) in rows.iter().enumerate() {
+        grid = grid.child(row(r, false, ix + 1 == rows.len()));
+    }
+    view()
+        .rounded(px(8.0))
+        .overflow_hidden()
+        .border_1()
+        .border_color(c(tokens::CARD_BORDER))
+        .child(scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(grid))
+}
+
 pub fn render(src: &str, size: f32) -> View {
     let mut col = view().gap(px(8.0));
     for b in blocks(src) {
@@ -307,6 +378,7 @@ pub fn render(src: &str, size: f32) -> View {
                 .into_element(),
             Block::Quote(q) => view().flex_row().child(view().w(px(3.0)).rounded(px(2.0)).bg(c(tokens::CARD_BORDER))).child(view().flex_1().pl_3().child(inline(&q, size, tokens::MUTED))).into_element(),
             Block::Code(lang, code) => code_block(&lang, &code).into_element(),
+            Block::Table(head, rows) => table(&head, &rows, size).into_element(),
             Block::Rule => view().h(px(1.0)).bg(c(tokens::CARD_BORDER)).into_element(),
         });
     }
@@ -329,6 +401,10 @@ mod tests {
         let s = spans("reads `card.last4` **now** and *maybe* [docs](https://x)");
         let kinds: Vec<_> = s.iter().filter(|(k, _)| *k != Style::Plain).map(|(k, t)| (*k, t.as_str())).collect();
         assert!(kinds == vec![(Style::Code, "card.last4"), (Style::Bold, "now"), (Style::Italic, "maybe"), (Style::Link, "docs")]);
+        let t = blocks("Hoy:\n\n| ID | Causa |\n|---|:---:|\n| `j1` | a \\| b |\n| j2 |\nfin");
+        assert!(matches!(&t[1], Block::Table(h, r) if h == &["ID", "Causa"] && r.len() == 2 && r[0][1] == "a | b" && r[1] == ["j2", ""]));
+        assert!(matches!(&t[2], Block::Para(p) if p == "fin"));
+        assert!(has_table("| a |\n|---|") && !has_table("a | b\nno"));
         // Sin cierre: queda como texto.
         assert_eq!(spans("a `b"), vec![(Style::Plain, "a `b".to_string())]);
     }

@@ -1,6 +1,7 @@
 //! Los logos de los proveedores de los agentes (la marca que manda el daemon: `agents::logo`), para
-//! los avatares de los hilos. Los trazos son de simple-icons (CC0, https://simpleicons.org); los que
-//! no están ahí (Groq, Mistral, MiniMax, OpenRouter, DeepSeek) van con su inicial en su color.
+//! los avatares de los hilos. Los trazos son de simple-icons (CC0, https://simpleicons.org); el de
+//! MiniMax, de sus recursos de marca (la onda, con su degradado); los que no están (Groq, Mistral,
+//! OpenRouter, DeepSeek) van con su inicial en su color.
 
 use nsh_core::ui::prelude::*;
 
@@ -23,7 +24,6 @@ fn letter(logo: &str) -> Option<(&'static str, (u32, u32))> {
     Some(match logo {
         "groq" => ("G", (0xf55036, 0xf55036)),
         "mistral" => ("M", (0xfa520f, 0xfa520f)),
-        "minimax" => ("M", (0xe5446d, 0xe5446d)),
         "openrouter" => ("O", (0x6467f2, 0x6467f2)),
         "deepseek" => ("D", (0x4d6bfe, 0x4d6bfe)),
         _ => return None,
@@ -32,13 +32,16 @@ fn letter(logo: &str) -> Option<(&'static str, (u32, u32))> {
 
 /// Hay logo (trazo o inicial de marca) para esta marca.
 pub fn known(logo: &str) -> bool {
-    mark(logo).is_some() || letter(logo).is_some()
+    logo == "minimax" || mark(logo).is_some() || letter(logo).is_some()
 }
 
 /// El avatar de un agente con el logo de su proveedor: el trazo de la marca sobre un círculo claro,
 /// o su inicial en su color. `None` si la marca no se conoce (quien llama dibuja la inicial del nombre).
 pub fn avatar(logo: &str, size: f32) -> Option<AnyElement> {
     let ring = view().w(px(size)).h(px(size)).flex_shrink_0().rounded(px(size / 2.0)).items_center().justify_center();
+    if logo == "minimax" {
+        return Some(ring.bg(c(tokens::CARD)).border_1().border_color(c(tokens::CARD_BORDER)).child(minimax(size * 0.62)).into_element());
+    }
     if let Some((d, color)) = mark(logo) {
         let inner = size * 0.58;
         let k = inner / 24.0;
@@ -47,4 +50,21 @@ pub fn avatar(logo: &str, size: f32) -> Option<AnyElement> {
     }
     let (l, color) = letter(logo)?;
     Some(ring.bg(c(color)).child(text(l).text_size(px(size * 0.45)).font_weight(FontWeight::SEMIBOLD).text_color(c((0xffffff, 0xffffff)))).into_element())
+}
+
+/// La onda de MiniMax (de sus recursos de marca): un solo trazo redondeado, del magenta al naranja.
+/// La línea central en una caja de 1101×925, trazo de 52.
+const MINIMAX: &str = "M26 439V504A65.5 65.5 0 0 0 158 504V326A65.5 65.5 0 0 1 289 326V746A65.5 65.5 0 0 0 420 746V91A65.5 65.5 0 0 1 551 91V633M551 741V833A65.5 65.5 0 0 0 682 833V91A65.5 65.5 0 0 1 813 91V676A65.5 65.5 0 0 0 944 676V326A65.5 65.5 0 0 1 1075 326V633";
+
+fn minimax(width: f32) -> AnyElement {
+    let k = width / 1101.0;
+    let gradient = || {
+        nsh_core::canvas::CanvasGradient::linear(Point { x: Points(0.0), y: Points(0.0) }, Point { x: Points(1101.0), y: Points(0.0) })
+            .add_color_stop(Percentage(0.0), now((0xe31680, 0xe31680)))
+            .add_color_stop(Percentage(1.0), now((0xfe613b, 0xfe613b)))
+    };
+    canvas(move || Painter::new().scale(k, k).stroke_style(gradient()).line_width(52.0).line_cap(nsh_core::canvas::LineCap::Round).line_join(nsh_core::canvas::LineJoin::Round).stroke_svg(MINIMAX))
+        .w(px(width))
+        .h(px(925.0 * k))
+        .into_element()
 }
