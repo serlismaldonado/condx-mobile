@@ -124,6 +124,8 @@ pub fn App() -> impl IntoElement {
     let recording = signal(Option::<f64>::None);
     let attach_menu = signal(false);
     let catalog = signal(Vec::<(String, String, String)>::new());
+    let agent_models = signal(Vec::<(String, Option<String>, Vec<String>)>::new());
+    let default_models = signal((String::new(), Vec::<String>::new()));
     // Una versión nueva de esta app (la publica el daemon): versión, número y enlace.
     let apk = signal(None::<(String, i64, String)>);
     // El mensaje que se está respondiendo (deslizando), hasta mandar o cancelar.
@@ -287,6 +289,14 @@ pub fn App() -> impl IntoElement {
                                     && catalog.get() != cat {
                                         catalog.set(cat);
                                     }
+                                if let Some((am, dm)) = with_phone(&slot, |p| (p.agent_models(), p.default_models())).await {
+                                    if agent_models.get() != am {
+                                        agent_models.set(am);
+                                    }
+                                    if default_models.get() != dm {
+                                        default_models.set(dm);
+                                    }
+                                }
                                 if let Some((cat, st)) = with_phone(&slot, |p| (p.run_catalog(), p.run_state())).await {
                                     if run_catalog.get() != cat {
                                         run_catalog.set(cat);
@@ -620,6 +630,10 @@ pub fn App() -> impl IntoElement {
             catalog,
             close: close_thread.clone(),
             presence,
+            agent_models,
+            default_models,
+            model_pick: signal(None),
+            model_menu: signal(false),
             photo: std::rc::Rc::new(move || {
                 let add = add_photo.clone();
                 app_owner.run(|| spawn(async move {
@@ -1377,7 +1391,8 @@ pub fn App() -> impl IntoElement {
                                                             // Nombre en la fila del punto; el resto debajo, que sí se ajusta al ancho.
                                                             let mut col = view().gap_2();
                                                             for k in ks {
-                                                                let detail = format!("{} · key {}{}", k.model, k.key_hint, if k.opens { "" } else { " · can't open it here" });
+                                                                // Claude Code no tiene clave (usa la sesión de la Mac): solo el modelo.
+                                                                let detail = if k.key_hint.is_empty() { k.model.clone() } else { format!("{} · key {}{}", k.model, k.key_hint, if k.opens { "" } else { " · can't open it here" }) };
                                                                 col = col.child(view().gap_1().child(status_tag(if k.opens { Health::Ok } else { Health::Bad }, k.label)).child(muted(detail)));
                                                             }
                                                             col.into_element()

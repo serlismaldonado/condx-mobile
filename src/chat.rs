@@ -154,6 +154,22 @@ pub struct Composer {
     pub close: Rc<dyn Fn()>,
     /// Quién contesta: la Mac, el sitio en la nube (la Mac no está) o nadie (sin conexión).
     pub presence: Signal<Presence>,
+    /// El modelo de cada agente y los de su proveedor; el predeterminado y los suyos.
+    pub agent_models: Signal<Vec<(String, Option<String>, Vec<String>)>>,
+    pub default_models: Signal<(String, Vec<String>)>,
+    /// Otro modelo para el próximo mensaje (el chip del modelo) y si se ve la lista para elegir.
+    pub model_pick: Signal<Option<String>>,
+    pub model_menu: Signal<bool>,
+}
+
+/// A qué agente va el texto (la mención del principio) y su modelo y modelos; sin mención, los
+/// predeterminados.
+fn target_models(text: &str, agents: &[(String, Option<String>, Vec<String>)], default: &(String, Vec<String>)) -> (String, Vec<String>) {
+    let handle = text.trim_start().strip_prefix('@').and_then(|r| r.split_whitespace().next()).map(str::to_lowercase);
+    match handle.and_then(|h| agents.iter().find(|(id, _, _)| id.to_lowercase() == h)) {
+        Some((_, m, ms)) => (m.clone().or_else(|| ms.first().cloned()).unwrap_or_default(), ms.clone()),
+        None => default.clone(),
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Default)]
@@ -897,6 +913,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
         }
     };
     let files = composer.files;
+    let (agent_models, default_models, model_pick, model_menu) = (composer.agent_models, composer.default_models, composer.model_pick, composer.model_menu);
     let do_send = move || {
         let mut msg = text_sig.get().trim().to_string();
         let pending = files.get();
@@ -911,6 +928,15 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
             msg = format!("{msg}\n\n> Replying to {name}: {snippet}");
             reply.set(None);
         }
+        // Otro modelo para este mensaje (el chip): va al principio, firmado con el texto.
+        if let Some(m) = model_pick.get() {
+            let (current, _) = target_models(&msg, &agent_models.get(), &default_models.get());
+            if m != current {
+                msg = format!("[model: {m}] {msg}");
+            }
+            model_pick.set(None);
+        }
+        model_menu.set(false);
         text_sig.set(String::new());
         send(id.clone(), msg);
         scroller.scroll_to_end(true);
@@ -1040,6 +1066,35 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                     None => view().into_element(),
                 }))
                 .child(dynamic(chips_row))
+                // Elegir otro modelo para el próximo mensaje (los del proveedor del agente).
+                .child(dynamic(move || {
+                    if !model_menu.get() {
+                        return view().into_element();
+                    }
+                    let (current, models) = target_models(&text_sig.get(), &agent_models.get(), &default_models.get());
+                    let chosen = model_pick.get().unwrap_or(current);
+                    let mut row = view().flex_row().gap_2().px_3().pt_2();
+                    for m in models {
+                        let on = m == chosen;
+                        let pick = m.clone();
+                        row = row.child(
+                            view()
+                                .h(px(28.0))
+                                .px(px(10.0))
+                                .justify_center()
+                                .rounded(px(14.0))
+                                .border_1()
+                                .border_color(c(if on { tokens::ACCENT } else { tokens::CARD_BORDER }))
+                                .active(|s| s.bg(c(tokens::ACTIVE)))
+                                .on_press(move || {
+                                    model_pick.set(Some(pick.clone()));
+                                    model_menu.set(false);
+                                })
+                                .child(text(m).text_size(px(12.5)).font_family(theme::MONO_FONT).text_color(c(if on { tokens::FG } else { tokens::MUTED }))),
+                        );
+                    }
+                    scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(row).into_element()
+                }))
                 // Los adjuntos del próximo mensaje (suben enseguida; × los quita).
                 .child(dynamic(move || {
                     let list = files.get();
@@ -1163,6 +1218,29 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             .gap_2()
                             .items_center()
                             .child(round(38.0).border_1().border_color(c(tokens::CARD_BORDER)).active(|s| s.bg(c(tokens::ACTIVE))).on_press(move || menu.set(!menu.get())).child(theme::icon(theme::PLUS, tokens::MUTED, 20.0)))
+                            // El modelo con que contesta el agente (el de la mención o el predeterminado):
+                            // tocarlo deja elegir otro para este mensaje.
+                            .child(dynamic(move || {
+                                let (current, models) = target_models(&text_sig.get(), &agent_models.get(), &default_models.get());
+                                let shown = model_pick.get().unwrap_or(current);
+                                if shown.is_empty() {
+                                    return view().into_element();
+                                }
+                                let changed = model_pick.get().is_some();
+                                view()
+                                    .flex_row()
+                                    .gap(px(4.0))
+                                    .items_center()
+                                    .h(px(30.0))
+                                    .px(px(10.0))
+                                    .rounded(px(15.0))
+                                    .border_1()
+                                    .border_color(c(if changed { tokens::ACCENT } else { tokens::CARD_BORDER }))
+                                    .active(|s| s.bg(c(tokens::ACTIVE)))
+                                    .on_press(move || if models.len() > 1 { model_menu.set(!model_menu.get()) })
+                                    .child(text(shown).number_of_lines(1u32).text_size(px(12.0)).font_family(theme::MONO_FONT).text_color(c(if changed { tokens::FG } else { tokens::MUTED })))
+                                    .into_element()
+                            }))
                             .child(view().flex_1())
                             // Enviar; con el campo vacío y nada adjunto, grabar una nota de voz.
                             .child(dynamic(move || {

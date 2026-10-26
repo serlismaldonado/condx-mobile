@@ -703,6 +703,29 @@ impl Phone {
             .unwrap_or(Value::Null)
     }
 
+    /// El modelo de cada agente y los de su proveedor (fila `_agents`): (id, modelo, modelos).
+    pub fn agent_models(&self) -> Vec<(String, Option<String>, Vec<String>)> {
+        let Some(r) = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_agents") else { return vec![] };
+        let list: Vec<Value> = r.row.values.get("participants").and_then(Value::as_str).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+        list.iter()
+            .filter_map(|a| Some((a["id"].as_str()?.to_string(), a["model"].as_str().map(str::to_string), a["models"].as_array().map(|l| l.iter().filter_map(|m| m.as_str().map(str::to_string)).collect()).unwrap_or_default())))
+            .collect()
+    }
+
+    /// El modelo predeterminado y los del proveedor predeterminado (para un hilo nuevo o sin mención).
+    pub fn default_models(&self) -> (String, Vec<String>) {
+        let v = self
+            .engine
+            .rows(&self.threads_scope)
+            .into_iter()
+            .find(|r| r.row.id == "_settings")
+            .and_then(|r| r.row.values.get("settings").and_then(Value::as_str).and_then(|t| serde_json::from_str::<Value>(t).ok()))
+            .unwrap_or(Value::Null);
+        let models: Vec<String> = v["defaultModels"].as_array().map(|l| l.iter().filter_map(|m| m.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let model = v["defaultModel"].as_str().map(str::to_string).filter(|m| !m.is_empty()).or_else(|| models.first().cloned()).unwrap_or_default();
+        (model, models)
+    }
+
     /// En qué idioma contestan los agentes (la configuración que publica la Mac en `_settings`).
     pub fn agent_language(&self) -> String {
         self.engine
