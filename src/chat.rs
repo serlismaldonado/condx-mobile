@@ -673,7 +673,30 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
 }
 
 /// La lista de hilos: filas planas con la inicial del flujo, el estado y el último mensaje.
-pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<String>) -> View {
+/// Mientras llega la primera lista: filas grises con la forma de un hilo.
+fn skeleton() -> View {
+    let bar = |w: f32, h: f32| view().w(px(w)).h(px(h)).rounded(px(h / 2.0)).bg(c(tokens::HOVER));
+    let mut col = view().border_1().border_color(c(tokens::CARD_BORDER)).rounded(px(10.0)).overflow_hidden();
+    for ix in 0..5 {
+        let row = view()
+            .gap(px(9.0))
+            .px_3()
+            .py(px(14.0))
+            .bg(c(tokens::CARD))
+            .child(view().flex_row().gap_2().items_center().child(view().w(px(18.0)).h(px(18.0)).rounded(px(9.0)).bg(c(tokens::HOVER))).child(bar(180.0 + (ix % 3) as f32 * 30.0, 12.0)))
+            .child(bar(70.0, 16.0))
+            .child(bar(240.0 - (ix % 2) as f32 * 50.0, 10.0));
+        col = col.child(if ix > 0 { row.border_t_1().border_color(c(tokens::CARD_BORDER)) } else { row });
+    }
+    col
+}
+
+pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<String>, loaded: bool, shown: usize) -> View {
+    if list.is_empty() && !loaded {
+        return skeleton();
+    }
+    let more = list.len() > shown;
+    let list: Vec<Thread> = list.into_iter().take(shown).collect();
     if list.is_empty() {
         return view().items_center().gap_2().py(px(48.0)).px_4().child(text("No threads yet").text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
             text("Flows with agents (Condx → Workflows) open one per run. You can follow them and answer here.")
@@ -739,6 +762,10 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
             row = row.border_b_1().border_color(c(tokens::CARD_BORDER));
         }
         col = col.child(row);
+    }
+    // Hay más hilos: aparecen al seguir bajando.
+    if more {
+        col = col.child(view().items_center().py(px(14.0)).bg(c(tokens::CARD)).border_t_1().border_color(c(tokens::CARD_BORDER)).child(live::shimmer("Loading more…", 12.5)));
     }
     col
 }
@@ -930,7 +957,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                 .bg(c(tokens::GROUND))
                 .child(
                     view()
-                        .w(px(44.0))
+                        .w(px(34.0))
                         .h(px(56.0))
                         .items_center()
                         .justify_center()
@@ -947,7 +974,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .child(if t.id == "_new" { view().w(px(4.0)).into_element() } else { faces(&t, 24.0) })
+                            .child(if t.id == "_new" { view().w(px(4.0)).into_element() } else { faces_inline(&t, 18.0) })
                             .child(
                                 view()
                                     .flex_1()
@@ -1112,7 +1139,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .bg(c(tokens::RAISED))
                         // Quién contesta, en la esquina: laptop verde (la Mac), nube azul (el sitio en la
                         // nube) o nube roja (sin conexión).
-                        .child(view().absolute().top(px(10.0)).right(px(14.0)).child(dynamic(move || presence_icon(presence.get()))));
+                        .child(view().absolute().top(px(17.0)).right(px(16.0)).child(dynamic(move || presence_icon(presence.get()))));
                     let round = |size: f32| view().w(px(size)).h(px(size)).rounded(px(size / 2.0)).items_center().justify_center();
                     if let Some(secs) = composer.recording.get() {
                         return card
@@ -1143,6 +1170,8 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             // Varias líneas: Enter agrega una línea; se manda con el botón.
                             .multiline(true)
                             .px(px(6.0))
+                            // A la derecha, lugar para el ícono de quién contesta.
+                            .pr(px(28.0))
                             .py(px(4.0))
                             .min_h(px(36.0))
                             .max_h(px(160.0))

@@ -87,6 +87,10 @@ pub fn App() -> impl IntoElement {
     let deploy_direct = signal(false);
     // Hilos (F6): las corridas de los flujos con sus agentes; el que está abierto y lo que se escribe.
     let threads = signal(Vec::<Thread>::new());
+    // Ya llegó algo (de lo guardado o de la nube): sin esto, una lista vacía es «cargando» (skeleton).
+    let loaded = signal(false);
+    // Cuántos hilos se muestran: 20 y 20 más al acercarse al final.
+    let shown = signal(20usize);
     let thread_open = signal(Option::<String>::None);
     // La fila «_new» (pedir un hilo nuevo) tal como la ve este teléfono.
     let new_thread = signal(Option::<Thread>::None);
@@ -178,6 +182,25 @@ pub fn App() -> impl IntoElement {
                     continue;
                 }
                 fingerprint.set(sync::fingerprint_of(&id));
+                // Lo guardado primero (la réplica en disco): la lista al instante, antes de preguntar a la red.
+                if slot.lock().map(|g| g.is_none()).unwrap_or(false) {
+                    let opened = {
+                        let id = id.clone();
+                        let slot = slot.clone();
+                        blocking(move || Phone::open(&id).map(|p| *slot.lock().unwrap() = Some(p))).await
+                    };
+                    if let Ok(Err(e)) = opened {
+                        status.set(format!("Couldn't open: {e}"));
+                    }
+                    if let Some((ths, incs, list)) = with_phone(&slot, |p| (p.threads(), p.incidents(), p.approvals())).await
+                        && (!ths.is_empty() || !incs.is_empty()) {
+                            threads.set(ths);
+                            incidents.set(incs);
+                            approvals.set(list);
+                            loaded.set(true);
+                            screen.set(Screen::Ready);
+                        }
+                }
                 // Si sigue vinculado: al abrir y cada minuto (no en cada vuelta).
                 let state = if checked.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) && slot.lock().map(|g| g.is_some()).unwrap_or(false) {
                     Some(Ok("active".to_string()))
@@ -221,6 +244,9 @@ pub fn App() -> impl IntoElement {
                                 incidents.set(incs);
                                 if threads.get() != ths {
                                     threads.set(ths);
+                                }
+                                if !loaded.get() {
+                                    loaded.set(true);
                                 }
                                 if let Some(cat) = with_phone(&slot, |p| p.catalog()).await
                                     && catalog.get() != cat {
@@ -1031,6 +1057,13 @@ pub fn App() -> impl IntoElement {
                                     .flex_1()
                                     .child(scroll()
                                     .flex_1()
+                                    // Cerca del final, 20 hilos más (la lista entera no se arma de una vez).
+                                    .on_scroll(move |e: &ScrollEvent| {
+                                        let (y, h, total) = (f32::from(e.offset.y), f32::from(e.size.height), f32::from(e.content_size.height));
+                                        if y + h > total - 600.0 && shown.get() < threads.get().len() {
+                                            shown.set(shown.get() + 20);
+                                        }
+                                    })
                                     .child(
                                         view()
                                             .p_4()
@@ -1094,7 +1127,7 @@ pub fn App() -> impl IntoElement {
                                                     if thread_open.get().is_some() {
                                                         view().hidden().into_element()
                                                     } else {
-                                                        view().gap_3().child(update_banner(apk.get())).child(chat::list(threads.get(), thread_open, thread_text)).into_element()
+                                                        view().gap_3().child(update_banner(apk.get())).child(chat::list(threads.get(), thread_open, thread_text, loaded.get(), shown.get())).into_element()
                                                     }
                                                 }
                                             }))

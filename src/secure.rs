@@ -37,7 +37,34 @@ pub fn save(identity: &Identity) -> Result<(), String> {
 }
 
 pub fn clear() -> Result<(), String> {
+    clear_cache();
     platform::delete()
+}
+
+/// La carpeta de datos de la app (la réplica de Condx Cloud vive ahí: abre con lo último y sincroniza).
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    let dir = if cfg!(target_os = "android") {
+        let cmdline = std::fs::read("/proc/self/cmdline").ok()?;
+        let package = String::from_utf8_lossy(cmdline.split(|b| *b == 0).next().unwrap_or_default()).to_string();
+        std::path::PathBuf::from(format!("/data/data/{package}/files"))
+    } else if cfg!(target_os = "ios") {
+        std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support")
+    } else {
+        std::env::temp_dir().join("condx-mobile")
+    };
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Borra las réplicas guardadas (al desvincular el teléfono).
+pub fn clear_cache() {
+    if let Some(dir) = data_dir() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with("cloud-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
 }
 
 /// Dónde se guarda (para mostrarlo en la app).

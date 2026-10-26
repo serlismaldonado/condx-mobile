@@ -283,7 +283,13 @@ pub type Shared = Arc<Mutex<Phone>>;
 impl Phone {
     /// Con la identidad guardada (Keychain/Keystore): la llave, el token y a qué daemon pertenece.
     pub fn open(identity: &crate::secure::Identity) -> Result<Self, String> {
-        let (replica, outbox) = sqlite::open_in_memory().map_err(|e| e.to_string())?;
+        // En disco: abre con lo último que se vio (la lista sale al instante) y sincroniza solo lo que
+        // cambió; lo pendiente de mandar sobrevive a un cierre. Si no se puede, en memoria.
+        let file = crate::secure::data_dir().map(|d| d.join(format!("cloud-{}-{}.sqlite3", identity.daemon_id, identity.device_id)));
+        let (replica, outbox) = match file.as_deref().map(sqlite::open) {
+            Some(Ok(pair)) => pair,
+            _ => sqlite::open_in_memory().map_err(|e| e.to_string())?,
+        };
         let mut n = 0u64;
         let mut engine = Engine::open(replica, outbox, EngineConfig { backoff_base_ms: 200, backoff_max_ms: 5000, ..Default::default() }, move || {
             n += 1;
