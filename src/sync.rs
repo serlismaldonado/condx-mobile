@@ -453,6 +453,14 @@ impl Phone {
         list.iter().filter_map(|a| Some((a["id"].as_str()?.to_string(), a["name"].as_str()?.to_string(), a["logo"].as_str().unwrap_or("").to_string()))).collect()
     }
 
+    /// La última versión de la app del teléfono que publicó el daemon (fila `_apk`): versión, su
+    /// número (versionCode) y el enlace de descarga.
+    pub fn latest_apk(&self) -> Option<(String, i64, String)> {
+        let r = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_apk")?;
+        let v = &r.row.values;
+        Some((v.get("version")?.as_str()?.to_string(), v.get("versionCode")?.as_i64()?, v.get("url")?.as_str()?.to_string()))
+    }
+
     /// La llave age de la Mac (la publica el daemon en la fila `_mac` de los hilos).
     pub fn mac_recipient(&self) -> Option<age::x25519::Recipient> {
         self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("recipient")?.as_str()?.parse().ok()

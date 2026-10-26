@@ -197,6 +197,19 @@ mod platform {
         })
     }
 
+    /// Abre un enlace con el navegador (la descarga de una versión nueva: Android la instala).
+    pub fn open_url(url: &str) -> Result<(), String> {
+        with_env(|env| {
+            let ctx = context(env)?;
+            let uri = parse_uri(env, url)?;
+            let action = j!(env, "link", env.new_string("android.intent.action.VIEW"));
+            let intent = j!(env, "link", env.new_object("android/content/Intent", "(Ljava/lang/String;Landroid/net/Uri;)V", &[JValue::Object(&action), JValue::Object(&uri)]));
+            j!(env, "link", env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(0x1000_0000)]));
+            j!(env, "open the link", env.call_method(&ctx, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)]));
+            Ok(())
+        })
+    }
+
     fn resolver<'a>(env: &mut JNIEnv<'a>) -> Result<JObject<'a>, String> {
         let ctx = context(env)?;
         env.call_method(&ctx, "getContentResolver", "()Landroid/content/ContentResolver;", &[]).and_then(|v| v.l()).map_err(jerr)
@@ -357,6 +370,9 @@ mod platform {
     pub fn open_camera_app() -> Result<(), String> {
         Err("no camera here".into())
     }
+    pub fn open_url(_url: &str) -> Result<(), String> {
+        Err("can't open links here".into())
+    }
     pub fn start_photo() -> Result<(), String> {
         Err("there's no camera here".into())
     }
@@ -365,7 +381,7 @@ mod platform {
     }
 }
 
-pub use platform::{cancel, clipboard, open_camera_app, pending, poll, poll_photo, start, start_photo};
+pub use platform::{cancel, clipboard, open_camera_app, open_url, pending, poll, poll_photo, start, start_photo};
 
 /// En qué va una foto para adjuntar.
 #[derive(Debug, Clone, PartialEq)]

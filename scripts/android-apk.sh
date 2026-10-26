@@ -40,9 +40,14 @@ cat > "$TMP/AndroidManifest.xml" <<'XML'
     </application>
 </manifest>
 XML
-"$BT/aapt2" link -o "$TMP/manifest.apk" -I "$ANDROID_HOME/platforms/android-35/android.jar" --manifest "$TMP/AndroidManifest.xml" --min-sdk-version 28 --target-sdk-version 35 --version-code 1 --version-name 1.0.0
+# La versión sale de Cargo.toml; el número (versionCode) crece con ella: Android solo instala encima
+# una versión con número mayor o igual (y la misma firma).
+VERSION="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+IFS=. read -r MA MI PA <<<"$VERSION"
+CODE=$((MA * 10000 + MI * 100 + PA))
+"$BT/aapt2" link -o "$TMP/manifest.apk" -I "$ANDROID_HOME/platforms/android-35/android.jar" --manifest "$TMP/AndroidManifest.xml" --min-sdk-version 28 --target-sdk-version 35 --version-code "$CODE" --version-name "$VERSION"
 (cd "$TMP" && unzip -q -o manifest.apk AndroidManifest.xml -d m && zip -q -d in.apk AndroidManifest.xml && cd m && zip -q -X ../in.apk AndroidManifest.xml)
 "$BT/zipalign" -P 16 -f 4 "$TMP/in.apk" "$TMP/aligned.apk"
 "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android --out .nsh/out/condx-mobile-arm64.apk "$TMP/aligned.apk"
 "$BT/zipalign" -c -P 16 4 .nsh/out/condx-mobile-arm64.apk
-echo "✓ .nsh/out/condx-mobile-arm64.apk"
+echo "✓ .nsh/out/condx-mobile-arm64.apk ($VERSION, $CODE)"

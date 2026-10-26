@@ -88,6 +88,8 @@ pub fn App() -> impl IntoElement {
     let recording = signal(Option::<f64>::None);
     let attach_menu = signal(false);
     let catalog = signal(Vec::<(String, String, String)>::new());
+    // Una versión nueva de esta app (la publica el daemon): versión, número y enlace.
+    let apk = signal(None::<(String, i64, String)>);
     // El mensaje que se está respondiendo (deslizando), hasta mandar o cancelar.
     let thread_reply = signal(chat::ReplyTo::None);
     // Claves de proveedores cifradas para este teléfono (A6): cuáles llegaron y si se abren aquí.
@@ -197,6 +199,10 @@ pub fn App() -> impl IntoElement {
                                 if let Some(cat) = with_phone(&slot, |p| p.catalog()).await
                                     && catalog.get() != cat {
                                         catalog.set(cat);
+                                    }
+                                if let Some(a) = with_phone(&slot, |p| p.latest_apk()).await
+                                    && apk.get() != a {
+                                        apk.set(a);
                                     }
                                 if let Some(nt) = with_phone(&slot, |p| p.new_thread()).await {
                                     // El daemon creó el hilo pedido desde «New thread»: abrirlo.
@@ -1032,7 +1038,7 @@ pub fn App() -> impl IntoElement {
                                                     if thread_open.get().is_some() {
                                                         view().hidden().into_element()
                                                     } else {
-                                                        chat::list(threads.get(), thread_open, thread_text).into_element()
+                                                        view().gap_3().child(update_banner(apk.get())).child(chat::list(threads.get(), thread_open, thread_text)).into_element()
                                                     }
                                                 }
                                             }))
@@ -1120,4 +1126,54 @@ pub fn App() -> impl IntoElement {
                     ),
             ),
         )
+}
+
+/// Esta app: su versión y su número (como el versionCode de la APK: MA·10000 + MI·100 + PA).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn version_code(v: &str) -> i64 {
+    let mut p = v.split('.').map(|x| x.parse::<i64>().unwrap_or(0));
+    p.next().unwrap_or(0) * 10_000 + p.next().unwrap_or(0) * 100 + p.next().unwrap_or(0)
+}
+
+/// «Nueva versión de Condx · Instalar» si el daemon publicó una más nueva que esta: abre la descarga
+/// (Android la instala sobre esta, con la misma firma).
+fn update_banner(latest: Option<(String, i64, String)>) -> AnyElement {
+    let Some((version, _, url)) = latest.filter(|(_, code, _)| *code > version_code(VERSION)) else { return view().into_element() };
+    view()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .px_3()
+        .py(px(10.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(c(tokens::ACCENT))
+        .child(view().flex_1().gap(px(2.0)).child(text(format!("Condx {version} is ready")).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(text(format!("You have {VERSION}. Download it and Android installs it over this one.")).text_size(px(12.0)).text_color(c(tokens::MUTED))))
+        .child(
+            view()
+                .px_3()
+                .h(px(32.0))
+                .justify_center()
+                .rounded(px(16.0))
+                .bg(c(tokens::ACCENT))
+                .active(|s| s.opacity(0.8))
+                .on_press(move || {
+                    if let Err(e) = scan::open_url(&url) {
+                        log::error!("update: couldn't open the download: {e}");
+                    }
+                })
+                .child(text("Install").text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ON_ACCENT))),
+        )
+        .into_element()
+}
+
+#[cfg(test)]
+mod version_tests {
+    #[test]
+    fn el_numero_de_version_crece_con_la_version() {
+        assert_eq!(super::version_code("0.1.0"), 100);
+        assert_eq!(super::version_code("0.3.12"), 312);
+        assert!(super::version_code("1.0.0") > super::version_code("0.99.99"));
+    }
 }
