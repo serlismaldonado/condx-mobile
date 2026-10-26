@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "nsh-app-condx-mobile"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "age",
  "ed25519-dalek",
