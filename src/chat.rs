@@ -507,6 +507,17 @@ fn banner(tone: (u32, u32), label: &str, body: View) -> View {
         .child(view().flex_1().gap_1().px_3().py_2().child(text(label.to_uppercase()).text_size(px(10.5)).letter_spacing(px(0.6)).font_weight(FontWeight::MEDIUM).text_color(c(tone))).child(body))
 }
 
+/// La marca de un mensaje enviado: una (✓, en la nube) o dos (✓✓, la leyó un agente), dibujadas como
+/// íconos (el carácter de la fuente sale como «√»). Caja de 16×11, trazo redondeado.
+fn check_mark(double: bool, color: (u32, u32)) -> View {
+    let path = if double { "M1 6.2L4.4 9.5L11 2.5M6.4 8.4L7.6 9.5L14.2 2.5" } else { "M3 6.2L6.4 9.5L13 2.5" };
+    let k = 0.9;
+    let icon = canvas(move || Painter::new().scale(k, k).stroke_style(crate::theme::now(color)).line_width(1.6).line_cap(nsh_core::canvas::LineCap::Round).line_join(nsh_core::canvas::LineJoin::Round).stroke_svg(path))
+        .w(px(16.0 * k))
+        .h(px(11.0 * k));
+    view().child(icon)
+}
+
 fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View, approvals: Signal<Vec<Approval>>, decide: &Decide, reply: Signal<ReplyTo>, handles: &[(String, String, String)]) -> AnyElement {
     let body = it["text"].as_str().unwrap_or_default().trim().to_string();
     let at = it["at"].as_i64().unwrap_or(0);
@@ -541,7 +552,7 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                     // ✓✓ junto a la hora cuando un agente ya lo leyó.
                     let mut row = view().flex_row().items_center().gap(px(4.0)).child(text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE)));
                     if it["mark"] == "read" {
-                        row = row.child(text("✓✓").text_size(px(10.0)).text_color(c(tokens::ACCENT)));
+                        row = row.child(check_mark(true, tokens::ACCENT));
                     }
                     row.into_element()
                 });
@@ -778,7 +789,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .opacity(0.75)
                         .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
                         // Enviándose (todavía en el teléfono): gira; ya en la nube, esperando al agente: ✓.
-                        .child(view().flex_row().items_center().gap(px(4.0)).child(text("now").text_size(px(11.0)).text_color(c(tokens::SUBTLE))).child(if t.delivered { view().child(text("✓").text_size(px(10.0)).text_color(c(tokens::SUBTLE))) } else { live::spinner(10.0) })),
+                        .child(view().flex_row().items_center().gap(px(4.0)).child(text("now").text_size(px(11.0)).text_color(c(tokens::SUBTLE))).child(if t.delivered { check_mark(false, tokens::SUBTLE) } else { live::spinner(10.0) })),
                 );
             }
             // Con un agente escribiendo, su burbuja ya dice que trabaja.
