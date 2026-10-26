@@ -52,8 +52,9 @@ async fn with_phone<R: Send + 'static>(slot: &Slot, f: impl FnOnce(&mut Phone) -
     blocking(move || slot.lock().ok()?.as_mut().map(f)).await.ok().flatten()
 }
 
-/// Sin latido de la Mac en este rato, se la da por apagada (late cada 5 min).
-const MAC_OFFLINE_MS: i64 = 12 * 60_000;
+/// Sin latido de la Mac en este rato, se la da por apagada (late cada minuto; al irse en orden avisa
+/// con 0 y se ve enseguida).
+const MAC_OFFLINE_MS: i64 = 3 * 60_000;
 
 #[component]
 pub fn App() -> impl IntoElement {
@@ -247,10 +248,11 @@ pub fn App() -> impl IntoElement {
                                 if status.get().starts_with("Offline") {
                                     status.set(String::new());
                                 }
-                                // Sin latido de la Mac en 12 min (late cada 5): está apagada o sin red; lo
-                                // que se mande espera a que vuelva.
+                                // Sin latido de la Mac en 3 min (late cada minuto) o despedida: está apagada
+                                // o sin red; contesta el sitio en la nube, si hay.
                                 let mac_off = alive.filter(|at| sync::now_ms() - at > MAC_OFFLINE_MS);
                                 sync_line.set(match (pending, mac_off) {
+                                    (0, Some(0)) => "Mac offline".to_string(),
                                     (0, Some(at)) => format!("Mac offline · {}", theme::ago(at)),
                                     (0, None) => "in sync".to_string(),
                                     (n, _) => format!("sending {n}…"),
