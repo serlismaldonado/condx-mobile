@@ -44,6 +44,8 @@ pub struct EnvsCtx {
     /// Si este teléfono pidió algo a un servicio (para mostrar en qué quedó).
     pub asked: Signal<bool>,
     pub send: Rc<dyn Fn(Value)>,
+    /// Los proyectos abiertos (los demás, plegados en una línea con su estado).
+    pub open: Signal<Vec<String>>,
 }
 
 /// Un número con su nombre, como las tarjetas de arriba de la vista general de la Mac.
@@ -212,7 +214,55 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
     projects.dedup();
     for project in projects {
         let sum = summary_of(&project);
-        let mut block = view().gap_2().child(section(&project));
+        let expanded = ctx.open.get().contains(&project);
+        // Plegado: el nombre con su estado en una línea (en línea, avisos, servicios que corren).
+        let mine: Vec<&Env> = list.iter().filter(|e| e.project == project).collect();
+        let down = mine.iter().filter(|e| e.reachable == Some(false) && e.kind != "devbox").count();
+        let notes_n = sum["attention"].as_array().map(Vec::len).unwrap_or(0);
+        let up = sum["services"].as_array().into_iter().flatten().filter(|s| s["status"] == "running").count();
+        let n = mine.len();
+        let mut glance = vec![crate::i18n::tr(format!("{n} env{}", if n == 1 { "" } else { "s" }), format!("{n} entorno{}", if n == 1 { "" } else { "s" }))];
+        if down > 0 {
+            glance.push(crate::i18n::tr(format!("{down} down"), format!("{down} caído{}", if down == 1 { "" } else { "s" })));
+        }
+        if notes_n > 0 {
+            glance.push(crate::i18n::tr(format!("{notes_n} warning{}", if notes_n == 1 { "" } else { "s" }), format!("{notes_n} aviso{}", if notes_n == 1 { "" } else { "s" })));
+        }
+        if up > 0 {
+            glance.push(crate::i18n::tr(format!("{up} running"), format!("{up} corriendo")));
+        }
+        let health = if down > 0 { Health::Bad } else if notes_n > 0 { Health::Warn } else { Health::Ok };
+        let toggle = {
+            let open = ctx.open;
+            let p = project.clone();
+            move || {
+                let mut v = open.get();
+                if let Some(i) = v.iter().position(|x| *x == p) {
+                    v.remove(i);
+                } else {
+                    v.push(p.clone());
+                }
+                theme::set_pref("openProjects", json!(v));
+                open.set(v);
+            }
+        };
+        let header = view()
+            .flex_row()
+            .gap_2()
+            .items_center()
+            .py(px(6.0))
+            .active(|s| s.opacity(0.6))
+            .on_press(toggle)
+            .child(theme::icon(if expanded { theme::CHEVRON_DOWN } else { theme::CHEVRON_RIGHT }, tokens::SUBTLE, 14.0))
+            .child(section(&project))
+            .child(view().flex_1())
+            .child(theme::dot(health))
+            .child(text(glance.join(" · ")).number_of_lines(1u32).text_size(px(11.5)).text_color(c(tokens::SUBTLE)));
+        if !expanded {
+            col = col.child(header);
+            continue;
+        }
+        let mut block = view().gap_2().child(header);
         // Lo que pide atención, como en la Mac: en ámbar, una línea por cosa.
         let notes: Vec<View> = sum["attention"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).map(|a| status_tag(Health::Warn, a.to_string()).into_element()).map(|e| view().child(e)).collect();
         if !notes.is_empty() {

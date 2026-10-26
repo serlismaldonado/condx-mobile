@@ -348,6 +348,9 @@ pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 
 /// Rama de git (Lucide «git-branch»).
 pub const BRANCH: &[&str] = &["M6 3v12", "M18 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M18 9a9 9 0 0 1-9 9"];
 
+pub const CHEVRON_RIGHT: &[&str] = &["m9 18 6-6-6-6"];
+pub const CHEVRON_DOWN: &[&str] = &["m6 9 6 6 6-6"];
+
 pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
 /// Una laptop (la Mac contesta) y una nube (contesta el sitio en la nube). Trazos de Lucide (ISC).
 /// Las pestañas de abajo (trazos de Lucide, ISC).
@@ -368,14 +371,31 @@ pub fn mic_icon(color: (u32, u32), size: f32) -> CanvasView {
 
 /// El tema elegido en Ajustes (`system`, `light`, `dark`), guardado en el teléfono.
 pub fn saved_scheme() -> String {
+    pref("theme").as_str().map(str::to_string).unwrap_or_else(|| "system".into())
+}
+
+/// Las preferencias de este teléfono (`prefs.json`): el tema, los proyectos abiertos…
+fn prefs() -> serde_json::Value {
     crate::secure::data_dir()
         .and_then(|d| std::fs::read_to_string(d.join("prefs.json")).ok())
         .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| v["theme"].as_str().map(str::to_string))
-        .unwrap_or_else(|| "system".into())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}))
 }
 
-/// Aplica el tema (sistema, claro u oscuro) y lo guarda.
+pub fn pref(key: &str) -> serde_json::Value {
+    prefs()[key].clone()
+}
+
+/// Guarda una preferencia sin tocar las demás.
+pub fn set_pref(key: &str, value: serde_json::Value) {
+    if let Some(d) = crate::secure::data_dir() {
+        let mut all = prefs();
+        all[key] = value;
+        let _ = std::fs::write(d.join("prefs.json"), all.to_string());
+    }
+}
+
 pub fn apply_scheme(scheme: &str, save: bool) {
     let appearance = match scheme {
         "light" => nsh_core::ui::Appearance::Light,
@@ -383,8 +403,8 @@ pub fn apply_scheme(scheme: &str, save: bool) {
         _ => nsh_core::ui::Appearance::System,
     };
     nsh_core::ui::ambient::set_color_scheme(appearance);
-    if save && let Some(d) = crate::secure::data_dir() {
-        let _ = std::fs::write(d.join("prefs.json"), serde_json::json!({ "theme": scheme }).to_string());
+    if save {
+        set_pref("theme", serde_json::json!(scheme));
     }
 }
 

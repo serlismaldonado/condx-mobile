@@ -101,6 +101,7 @@ pub fn App() -> impl IntoElement {
     // El resumen de cada proyecto (servicios, git, lo que pide atención) y si se pidió algo a un servicio.
     let overview = signal(serde_json::Value::Null);
     let service_asked = signal(false);
+    let open_projects = signal(theme::pref("openProjects").as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>()).unwrap_or_default());
     // Pedir correr una receta o un flujo: el formulario, el catálogo de la Mac y cómo va lo pedido.
     let run_form = ops::RunForm::new();
     let run_catalog = signal((Vec::<sync::RecipeInfo>::new(), Vec::<sync::FlowInfo>::new()));
@@ -1198,6 +1199,7 @@ pub fn App() -> impl IntoElement {
                                                         state: run_state.get(),
                                                         asked: service_asked,
                                                         send: run_send.clone(),
+                                                        open: open_projects,
                                                     };
                                                     ops::envs(envs.get(), ctx).into_element()
                                                 }
