@@ -512,7 +512,7 @@ fn banner(tone: (u32, u32), label: &str, body: View) -> View {
 fn check_mark(double: bool, color: (u32, u32)) -> View {
     let path = if double { "M1 6.2L4.4 9.5L11 2.5M6.4 8.4L7.6 9.5L14.2 2.5" } else { "M3 6.2L6.4 9.5L13 2.5" };
     let k = 0.9;
-    let icon = canvas(move || Painter::new().scale(k, k).stroke_style(crate::theme::now(color)).line_width(1.6).line_cap(nsh_core::canvas::LineCap::Round).line_join(nsh_core::canvas::LineJoin::Round).stroke_svg(path))
+    let icon = canvas(move || Painter::new().scale(k, k).stroke_style(crate::theme::now(color)).line_width(1.3).line_cap(nsh_core::canvas::LineCap::Round).line_join(nsh_core::canvas::LineJoin::Round).stroke_svg(path))
         .w(px(16.0 * k))
         .h(px(11.0 * k));
     view().child(icon)
@@ -549,12 +549,12 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                 .child(if it["status"] == "queued" {
                     text("Queued · goes out when an agent is free").text_size(px(11.0)).text_color(c(tokens::WARNING)).into_element()
                 } else {
-                    // ✓✓ junto a la hora cuando un agente ya lo leyó.
-                    let mut row = view().flex_row().items_center().gap(px(4.0)).child(text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE)));
+                    // ✓✓ antes de la hora, en el mismo gris (como Claude), cuando un agente ya lo leyó.
+                    let mut row = view().flex_row().items_center().gap(px(4.0));
                     if it["mark"] == "read" {
-                        row = row.child(check_mark(true, tokens::ACCENT));
+                        row = row.child(check_mark(true, tokens::SUBTLE));
                     }
-                    row.into_element()
+                    row.child(text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE))).into_element()
                 });
             let to = Some((None, "you".to_string(), snippet));
             let long = to.clone();
@@ -789,7 +789,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .opacity(0.75)
                         .child(view().px_3().py_2().rounded(px(14.0)).rounded_br(px(4.0)).bg(c(tokens::USER_BUBBLE)).border_1().border_color(c(tokens::USER_BUBBLE_BORDER)).child(if pending.trim().is_empty() { text("Attachment").text_size(px(14.0)).text_color(c(tokens::MUTED)) } else { text(pending).text_size(px(14.0)).line_height(px(20.0)).text_color(c(tokens::FG)) }))
                         // Enviándose (todavía en el teléfono): gira; ya en la nube, esperando al agente: ✓.
-                        .child(view().flex_row().items_center().gap(px(4.0)).child(text("now").text_size(px(11.0)).text_color(c(tokens::SUBTLE))).child(if t.delivered { check_mark(false, tokens::SUBTLE) } else { live::spinner(10.0) })),
+                        .child(view().flex_row().items_center().gap(px(4.0)).child(if t.delivered { check_mark(false, tokens::SUBTLE) } else { live::spinner(10.0) }).child(text("now").text_size(px(11.0)).text_color(c(tokens::SUBTLE)))),
                 );
             }
             // Con un agente escribiendo, su burbuja ya dice que trabaja.
