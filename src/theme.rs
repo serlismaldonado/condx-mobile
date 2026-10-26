@@ -345,6 +345,9 @@ pub const ARROW_DOWN: &[&str] = &["M12 5v14", "m19 12-7 7-7-7"];
 /// La marca de Condx (assets/brand/mark.svg del repo condx).
 pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 1 0 0 6"];
 /// Agregar (un hilo nuevo).
+/// Rama de git (Lucide «git-branch»).
+pub const BRANCH: &[&str] = &["M6 3v12", "M18 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M18 9a9 9 0 0 1-9 9"];
+
 pub const PLUS: &[&str] = &["M5 12h14", "M12 5v14"];
 /// Una laptop (la Mac contesta) y una nube (contesta el sitio en la nube). Trazos de Lucide (ISC).
 /// Las pestañas de abajo (trazos de Lucide, ISC).

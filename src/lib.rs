@@ -98,6 +98,9 @@ pub fn App() -> impl IntoElement {
     let envs = signal(Vec::<sync::Env>::new());
     let jobs = signal(Vec::<sync::Job>::new());
     let job_open = signal(None::<String>);
+    // El resumen de cada proyecto (servicios, git, lo que pide atención) y si se pidió algo a un servicio.
+    let overview = signal(serde_json::Value::Null);
+    let service_asked = signal(false);
     // Pedir correr una receta o un flujo: el formulario, el catálogo de la Mac y cómo va lo pedido.
     let run_form = ops::RunForm::new();
     let run_catalog = signal((Vec::<sync::RecipeInfo>::new(), Vec::<sync::FlowInfo>::new()));
@@ -279,9 +282,12 @@ pub fn App() -> impl IntoElement {
                                         run_state.set(st);
                                     }
                                 }
-                                if let Some((es, js)) = with_phone(&slot, |p| (p.envs(), p.jobs())).await {
+                                if let Some((es, js, ov)) = with_phone(&slot, |p| (p.envs(), p.jobs(), p.overview())).await {
                                     if envs.get() != es {
                                         envs.set(es);
+                                    }
+                                    if overview.get() != ov {
+                                        overview.set(ov);
                                     }
                                     if jobs.get() != js {
                                         jobs.set(js);
@@ -1178,7 +1184,24 @@ pub fn App() -> impl IntoElement {
                                                     view().gap_3().child(ops::run_panel(run_form, envs.get(), recipes, flows, run_state.get(), run_send.clone())).child(ops::jobs(jobs.get(), job_open)).into_element()
                                                 }
                                             }))
-                                            .child(dynamic(move || if tab.get() == "envs" { ops::envs(envs.get()).into_element() } else { view().hidden().into_element() }))
+                                            .child(dynamic({
+                                                let run_send = run_send.clone();
+                                                move || {
+                                                    if tab.get() != "envs" {
+                                                        return view().hidden().into_element();
+                                                    }
+                                                    let ctx = ops::EnvsCtx {
+                                                        overview: overview.get(),
+                                                        running_jobs: jobs.get().iter().filter(|j| matches!(j.status.as_str(), "running" | "queued")).count(),
+                                                        approvals: waiting_count.get(),
+                                                        mac_on: presence.get() == chat::Presence::Mac,
+                                                        state: run_state.get(),
+                                                        asked: service_asked,
+                                                        send: run_send.clone(),
+                                                    };
+                                                    ops::envs(envs.get(), ctx).into_element()
+                                                }
+                                            }))
                                             .child(dynamic(move || {
                                                 if tab.get() != "approvals" {
                                                     return view().hidden().into_element();
@@ -1315,7 +1338,7 @@ pub fn App() -> impl IntoElement {
                                         let current = tab.get();
                                         let waiting_threads = threads.get().iter().filter(|t| t.waiting_answer || t.status == "waiting-approval").count();
                                         let running = jobs.get().iter().filter(|j| j.status == "running").count();
-                                        let down = envs.get().iter().filter(|e| e.reachable == Some(false)).count();
+                                        let down = envs.get().iter().filter(|e| e.reachable == Some(false) && e.kind != "devbox").count();
                                         let open = incidents.get().iter().filter(|i| i.status == "open").count();
                                         theme::tab_bar(
                                             vec![

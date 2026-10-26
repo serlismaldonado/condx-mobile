@@ -1,4 +1,4 @@
-//! Entornos y trabajos de la Mac (solo lectura): lo que la Mac publica en `env:` y `jobs:`. Con el
+//! Entornos (con el resumen y los servicios locales) y trabajos de la Mac: lo que la Mac publica en `env:` y `jobs:`. Con el
 //! mismo aspecto que la lista de hilos: una tarjeta con filas, el título arriba y una línea chica
 //! con el estado (solo si pide atención) y los detalles.
 
@@ -32,31 +32,209 @@ fn empty(title: &'static str, detail: &'static str) -> View {
         .child(text(detail).text_size(px(13.0)).line_height(px(19.0)).text_center().text_color(c(tokens::MUTED)))
 }
 
-/// Los entornos agrupados por proyecto: un punto si su Convex responde (verde), no (rojo) o todavía
-/// no se revisó (gris); el tipo (producción en rojo) y el deployment.
-pub fn envs(list: Vec<Env>) -> View {
+/// Lo que la pestaña de entornos necesita además de los entornos: el resumen de la Mac, los números
+/// de arriba y cómo pedir algo a un servicio.
+pub struct EnvsCtx {
+    pub overview: Value,
+    pub running_jobs: usize,
+    pub approvals: usize,
+    /// Si la Mac está encendida: los servicios corren en ella, sin ella no se manejan.
+    pub mac_on: bool,
+    pub state: RunState,
+    /// Si este teléfono pidió algo a un servicio (para mostrar en qué quedó).
+    pub asked: Signal<bool>,
+    pub send: Rc<dyn Fn(Value)>,
+}
+
+/// Un número con su nombre, como las tarjetas de arriba de la vista general de la Mac.
+fn stat(value: String, label: &str, tone: (u32, u32)) -> View {
+    view()
+        .flex_1()
+        .gap(px(2.0))
+        .px(px(10.0))
+        .py(px(10.0))
+        .rounded(px(10.0))
+        .border_1()
+        .border_color(c(tokens::CARD_BORDER))
+        .bg(c(tokens::CARD))
+        .child(text(value).text_size(px(18.0)).font_weight(FontWeight::MEDIUM).text_color(c(tone)))
+        .child(text(crate::i18n::t(label)).number_of_lines(1u32).text_size(px(10.5)).text_color(c(tokens::MUTED)))
+}
+
+/// Una línea chica de detalles separados por «·» (vacíos fuera).
+fn details(parts: Vec<String>, tone: (u32, u32), mono: bool) -> View {
+    let line = parts.into_iter().filter(|p| !p.is_empty()).collect::<Vec<_>>().join(" · ");
+    let t = text(line).number_of_lines(1u32).text_size(px(11.5)).text_color(c(tone));
+    view().flex_row().pl(px(16.0)).child(view().flex_1().child(if mono { t.font_family(theme::MONO_FONT) } else { t }))
+}
+
+fn megabytes(bytes: u64) -> String {
+    if bytes >= 1 << 30 {
+        format!("{:.1} GB", bytes as f64 / (1u64 << 30) as f64)
+    } else {
+        format!("{} MB", bytes >> 20)
+    }
+}
+
+/// Un servicio local (backend, deployer, frontend): estado, uso y sus botones.
+fn service_row(project: &str, svc: &Value, ctx: &EnvsCtx) -> View {
+    let st = |k: &str| svc[k].as_str().unwrap_or_default().to_string();
+    let status = st("status");
+    let busy = svc["busy"].as_str().map(str::to_string);
+    let error = svc["error"].as_str().filter(|e| !e.is_empty()).map(str::to_string);
+    let healthy = svc["healthy"].as_bool();
+    let (health, word) = match (&busy, status.as_str()) {
+        (Some(b), _) => (Health::Warn, match b.as_str() { "start" => "Starting…", "stop" => "Stopping…", _ => "Restarting…" }),
+        (None, "running") if healthy == Some(false) => (Health::Warn, "Not responding"),
+        (None, "running") => (Health::Ok, "Running"),
+        (None, "external") => (Health::Warn, "Port in use"),
+        _ if error.is_some() => (Health::Bad, "Failed"),
+        _ => (Health::Unknown, "Stopped"),
+    };
+    let mut parts = vec![crate::i18n::t(word)];
+    if let Some(cpu) = svc["cpu"].as_f64() {
+        parts.push(format!("{cpu:.0}% CPU"));
+    }
+    if let Some(mem) = svc["memory"].as_u64() {
+        parts.push(megabytes(mem));
+    }
+    // La fase del deployer cuenta mientras corre (o si quedó en error).
+    if let Some(phase) = svc["phase"].as_str().filter(|p| !p.is_empty() && *p != "unknown" && (status == "running" || *p == "error")) {
+        parts.push(crate::i18n::t(phase));
+    }
+    let mut title_row = view()
+        .flex_row()
+        .gap_2()
+        .items_center()
+        .child(theme::dot(health))
+        .child(view().flex_1().child(text(st("title")).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))));
+    if ctx.mac_on && busy.is_none() {
+        let ask = |action: &'static str| {
+            let send = ctx.send.clone();
+            let asked = ctx.asked;
+            let (project, name) = (project.to_string(), st("name"));
+            move || {
+                asked.set(true);
+                send(json!({ "service": { "project": project, "name": name, "action": action } }));
+            }
+        };
+        title_row = if status == "running" {
+            title_row.child(theme::small_button("Restart", Variant::Outline, ask("restart"))).child(theme::small_button("Stop", Variant::Outline, ask("stop")))
+        } else if status == "external" {
+            title_row
+        } else {
+            title_row.child(theme::small_button("Start", Variant::Outline, ask("start")))
+        };
+    }
+    let mut row = view().gap(px(4.0)).child(title_row).child(details(parts, if health == Health::Bad { tokens::DANGER } else { tokens::SUBTLE }, false));
+    if let Some(e) = error {
+        row = row.child(view().pl(px(16.0)).child(text(e).number_of_lines(3u32).text_size(px(11.5)).line_height(px(16.0)).text_color(c(tokens::DANGER))));
+    } else if status == "external" {
+        row = row.child(details(vec![st("detail")], tokens::SUBTLE, false));
+    }
+    row
+}
+
+/// Un entorno: si su Convex responde, cuánto tarda, su versión y qué commit tiene.
+fn env_row(e: &Env, extra: &Value) -> View {
+    let health = match e.reachable {
+        Some(true) => Health::Ok,
+        Some(false) => Health::Bad,
+        None => Health::Unknown,
+    };
+    let state = crate::i18n::t(match e.reachable {
+        Some(true) => "Responding",
+        Some(false) => "Not responding",
+        None => "Not checked yet",
+    });
+    let latency = extra["latencyMs"].as_i64().filter(|_| e.reachable == Some(true)).map(|ms| format!("{ms} ms")).unwrap_or_default();
+    let mut row = view()
+        .gap(px(4.0))
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .items_center()
+                .child(theme::dot(health))
+                .child(view().flex_1().child(text(e.name.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
+                .child(kind_tag(&e.kind)),
+        )
+        .child(details(vec![state, latency], if e.reachable == Some(false) { tokens::DANGER } else { tokens::SUBTLE }, false));
+    let mut code = vec![e.deployment.clone()];
+    if let Some(commit) = extra["commit"].as_str() {
+        code.push(commit.to_string());
+    }
+    if let Some(n) = extra["behind"].as_i64().filter(|n| *n > 0) {
+        let branch = extra["branch"].as_str().unwrap_or("main");
+        code.push(crate::i18n::tr(format!("{n} behind {branch}"), format!("{n} detrás de {branch}")));
+    }
+    if code.iter().any(|p| !p.is_empty()) {
+        row = row.child(details(code, tokens::SUBTLE, true));
+    }
+    row
+}
+
+/// La pestaña de entornos, como la vista general de la Mac: arriba los números (entornos en línea,
+/// trabajos que corren, por aprobar, lo que pide atención); después cada proyecto con lo que pide
+/// atención, su repositorio, sus entornos y sus servicios locales (levantar, detener, reiniciar).
+pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
     if list.is_empty() {
         return empty("No environments yet", "The Mac publishes its environments here once it's linked to Condx Cloud.");
     }
-    let mut col = view().gap_3();
+    let summaries: Vec<Value> = ctx.overview["projects"].as_array().cloned().unwrap_or_default();
+    let summary_of = |name: &str| summaries.iter().find(|p| p["name"] == name).cloned().unwrap_or(Value::Null);
+    // El backend local apagado no es una alerta (se levanta cuando se usa): solo cuentan los demás.
+    let watched: Vec<&Env> = list.iter().filter(|e| e.kind != "devbox").collect();
+    let online = watched.iter().filter(|e| e.reachable == Some(true)).count();
+    let attention: usize = summaries.iter().map(|p| p["attention"].as_array().map(Vec::len).unwrap_or(0)).sum();
+    let mut col = view().gap_3().child(
+        view()
+            .flex_row()
+            .gap_2()
+            .child(stat(format!("{online}/{}", watched.len()), "Online", if online < watched.len() { tokens::DANGER } else { tokens::FG }))
+            .child(stat(ctx.running_jobs.to_string(), "Running", tokens::FG))
+            .child(stat(ctx.approvals.to_string(), "To approve", if ctx.approvals > 0 { tokens::WARNING } else { tokens::FG }))
+            .child(stat(attention.to_string(), "Attention", if attention > 0 { tokens::DANGER } else { tokens::FG })),
+    );
+    // En qué quedó lo último que se pidió a un servicio.
+    if ctx.asked.get() && (ctx.state.waiting || ctx.state.result.is_some()) {
+        let (health, line) = match &ctx.state.result {
+            None => (Health::Unknown, crate::i18n::t("Sending your request to the Mac…")),
+            Some(r) if r.starts_with("rejected") => (Health::Bad, r.trim_start_matches("rejected: ").to_string()),
+            Some(r) => (Health::Ok, r.clone()),
+        };
+        col = col.child(status_tag(health, line));
+    }
+    if !ctx.mac_on {
+        col = col.child(muted("The Mac is off: its local services can be started when it's back."));
+    }
     let mut projects: Vec<String> = list.iter().map(|e| e.project.clone()).collect();
     projects.dedup();
     for project in projects {
-        let items: Vec<View> = list
-            .iter()
-            .filter(|e| e.project == project)
-            .map(|e| {
-                let health = match e.reachable {
-                    Some(true) => Health::Ok,
-                    Some(false) => Health::Bad,
-                    None => Health::Unknown,
-                };
-                let state = match e.reachable {
-                    Some(true) => "Responding",
-                    Some(false) => "Not responding",
-                    None => "Not checked yet",
-                };
-                let state = crate::i18n::t(state);
+        let sum = summary_of(&project);
+        let mut block = view().gap_2().child(section(&project));
+        // Lo que pide atención, como en la Mac: en ámbar, una línea por cosa.
+        let notes: Vec<View> = sum["attention"].as_array().into_iter().flatten().filter_map(|a| a.as_str()).map(|a| status_tag(Health::Warn, a.to_string()).into_element()).map(|e| view().child(e)).collect();
+        if !notes.is_empty() {
+            block = block.child(rows(notes));
+        }
+        // Entornos y, si la Mac lo publicó, el repositorio en la misma tarjeta.
+        let mut items: Vec<View> = list.iter().filter(|e| e.project == project).map(|e| env_row(e, &sum["envs"][&e.name])).collect();
+        let git = &sum["git"];
+        if git["branch"].is_string() {
+            let ahead = git["ahead"].as_i64().unwrap_or(0);
+            let changes = git["changed"].as_i64().unwrap_or(0) + git["untracked"].as_i64().unwrap_or(0);
+            let mut parts = vec![];
+            if ahead > 0 {
+                parts.push(crate::i18n::tr(format!("{ahead} unpushed"), format!("{ahead} sin subir")));
+            }
+            if changes > 0 {
+                parts.push(crate::i18n::tr(format!("{changes} changes"), format!("{changes} cambios")));
+            }
+            if parts.is_empty() {
+                parts.push(crate::i18n::t("Clean"));
+            }
+            items.push(
                 view()
                     .gap(px(4.0))
                     .child(
@@ -64,27 +242,32 @@ pub fn envs(list: Vec<Env>) -> View {
                             .flex_row()
                             .gap_2()
                             .items_center()
-                            .child(theme::dot(health))
-                            .child(view().flex_1().child(text(e.name.clone()).number_of_lines(1u32).text_size(px(14.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))))
-                            .child(kind_tag(&e.kind)),
+                            .child(theme::icon(theme::BRANCH, tokens::SUBTLE, 13.0))
+                            .child(view().flex_1().child(text(format!("{} · {}", git["branch"].as_str().unwrap_or(""), git["head"].as_str().unwrap_or(""))).number_of_lines(1u32).text_size(px(13.5)).font_family(theme::MONO_FONT).text_color(c(tokens::FG))))
+                            .child(text(parts.join(" · ")).text_size(px(11.5)).text_color(c(if ahead > 0 || changes > 0 { tokens::WARNING } else { tokens::SUBTLE }))),
                     )
-                    .child(
-                        view()
-                            .flex_row()
-                            .gap(px(6.0))
-                            .items_center()
-                            .pl(px(16.0))
-                            .child(text(state.to_string()).text_size(px(11.5)).text_color(c(if e.reachable == Some(false) { tokens::DANGER } else { tokens::SUBTLE })))
-                            .child(if e.deployment.is_empty() {
-                                view().into_element()
-                            } else {
-                                view().flex_row().gap(px(6.0)).flex_1().child(text("·").text_size(px(11.5)).text_color(c(tokens::SUBTLE))).child(view().flex_1().child(text(e.deployment.clone()).number_of_lines(1u32).text_size(px(11.5)).font_family(theme::MONO_FONT).text_color(c(tokens::SUBTLE)))).into_element()
-                            }),
-                    )
-            })
-            .collect();
-        let title = if project.is_empty() { "heskala-erp".to_string() } else { project };
-        col = col.child(view().gap_2().child(section(&title)).child(rows(items)));
+                    .child(details(vec![git["subject"].as_str().unwrap_or("").to_string()], tokens::SUBTLE, false)),
+            );
+        }
+        block = block.child(rows(items));
+        // Los servicios locales: el backend, el deployer y el frontend del proyecto.
+        let services: Vec<Value> = sum["services"].as_array().cloned().unwrap_or_default();
+        if !services.is_empty() {
+            let stopped = services.iter().filter(|s| s["status"] != "running").count();
+            let mut head = view().flex_row().items_center().pt(px(4.0)).child(view().flex_1().child(muted("Local services")));
+            if ctx.mac_on && services.iter().all(|s| s["busy"].is_null()) {
+                let (label, action) = if stopped > 0 { ("Start all", "start") } else { ("Stop all", "stop") };
+                let send = ctx.send.clone();
+                let asked = ctx.asked;
+                let p = project.clone();
+                head = head.child(theme::small_button(label, Variant::Outline, move || {
+                    asked.set(true);
+                    send(json!({ "service": { "project": p, "name": "all", "action": action } }));
+                }));
+            }
+            block = block.child(head).child(rows(services.iter().map(|s| service_row(&project, s, &ctx)).collect()));
+        }
+        col = col.child(block);
     }
     col
 }

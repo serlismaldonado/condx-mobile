@@ -679,6 +679,17 @@ impl Phone {
         RunState { waiting: r.pending || !answered, result: v.get("result").and_then(Value::as_str).filter(|_| answered).map(str::to_string) }
     }
 
+    /// El resumen de cada proyecto (la fila `_overview` que publica la Mac): git, deployer, servicios,
+    /// lo que pide atención y los detalles de cada entorno. `Null` si la Mac todavía no lo publicó.
+    pub fn overview(&self) -> Value {
+        self.engine
+            .rows(&self.threads_scope)
+            .into_iter()
+            .find(|r| r.row.id == "_overview")
+            .and_then(|r| r.row.values.get("overview").and_then(Value::as_str).and_then(|t| serde_json::from_str::<Value>(t).ok()))
+            .unwrap_or(Value::Null)
+    }
+
     /// En qué idioma contestan los agentes (la configuración que publica la Mac en `_settings`).
     pub fn agent_language(&self) -> String {
         self.engine
