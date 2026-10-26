@@ -1052,7 +1052,7 @@ pub fn App() -> impl IntoElement {
                         .border_1()
                         .border_color(c(tokens::CARD_BORDER))
                         .child(theme::dot(Health::Warn))
-                        .child(text(format!("{n} to approve")).text_size(px(12.0)))
+                        .child(text(crate::i18n::tr(format!("{n} to approve"), format!("{n} por aprobar"))).text_size(px(12.0)))
                         .into_element()
                 } else {
                     view().into_element()
