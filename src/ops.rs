@@ -44,6 +44,8 @@ pub struct EnvsCtx {
     pub approvals: usize,
     /// Si la Mac está encendida: los servicios corren en ella, sin ella no se manejan.
     pub mac_on: bool,
+    /// La Mac está encendida pero se hizo a un lado (Ajustes → Quién contesta → la nube).
+    pub handed: bool,
     pub state: RunState,
     /// Si este teléfono pidió algo a un servicio (para mostrar en qué quedó).
     pub asked: Signal<bool>,
@@ -219,7 +221,9 @@ pub fn envs(list: Vec<Env>, ctx: EnvsCtx) -> View {
         };
         col = col.child(status_tag(health, line));
     }
-    if !ctx.mac_on && ctx.cloud_on {
+    if ctx.handed {
+        col = col.child(muted("The cloud site is answering (chosen in Settings): services run there, against each project's cloud dev."));
+    } else if !ctx.mac_on && ctx.cloud_on {
         col = col.child(muted("The Mac is off: services run on the cloud site, against each project's cloud dev."));
     } else if !ctx.mac_on {
         col = col.child(muted("The Mac is off: its local services can be started when it's back."));

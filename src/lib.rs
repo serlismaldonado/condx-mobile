@@ -1304,6 +1304,7 @@ pub fn App() -> impl IntoElement {
                                                         running_jobs: jobs.get().iter().filter(|j| matches!(j.status.as_str(), "running" | "queued")).count(),
                                                         approvals: waiting_count.get(),
                                                         mac_on: presence.get() == chat::Presence::Mac,
+                                                        handed: cloud_mode.get(),
                                                         state: run_state.get(),
                                                         asked: service_asked,
                                                         send: run_send.clone(),

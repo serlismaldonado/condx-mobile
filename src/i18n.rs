@@ -188,6 +188,7 @@ const ES: &[(&str, &str)] = &[
     ("The Mac is off: its local services can be started when it's back.", "La Mac está apagada: sus servicios locales se manejan cuando vuelva."),
     ("Open", "Abrir"),
     ("Services on the cloud site", "Servicios en el sitio en la nube"),
+    ("The cloud site is answering (chosen in Settings): services run there, against each project's cloud dev.", "Contesta el sitio en la nube (elegido en Ajustes): los servicios corren ahí, contra el cloud dev de cada proyecto."),
     ("The Mac is off: services run on the cloud site, against each project's cloud dev.", "La Mac está apagada: los servicios corren en el sitio en la nube, contra el cloud dev de cada proyecto."),
     ("Sending your request to the cloud site…", "Enviando tu pedido a la nube…"),
     ("Push branch", "Subir la rama"),
