@@ -212,6 +212,23 @@ pub fn short(ms: i64) -> String {
 /// Deslizar para confirmar, como el «slide to unlock» del iPhone: la perilla amarilla sigue al
 /// dedo (en nativo, sin trabajo por cuadro) y, si llega casi al final, `on_done`; si no, vuelve.
 /// Reemplaza escribir el nombre del entorno: es igual de deliberado y no se hace por accidente.
+/// El deslizador mientras se espera lo que pidió: apagado, con un indicador y qué pasa; no se puede
+/// volver a deslizar (sin esto, si tardaba, se volvía a pedir).
+pub fn slide_busy(label: impl Into<String>) -> View {
+    view()
+        .h(px(48.0))
+        .flex_row()
+        .gap_2()
+        .items_center()
+        .justify_center()
+        .border_1()
+        .border_color(c(tokens::CARD_BORDER))
+        .bg(c(tokens::HOVER))
+        .opacity(0.8)
+        .child(crate::live::spinner(14.0))
+        .child(text(crate::i18n::t(&label.into())).text_size(px(13.5)).text_color(c(tokens::MUTED)))
+}
+
 pub fn slide_to_confirm(label: impl Into<String>, on_done: impl Fn() + Clone + 'static) -> impl IntoElement {
     let label: String = crate::i18n::t(&label.into());
     const KNOB: f32 = 48.0;

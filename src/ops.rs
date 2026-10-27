@@ -414,7 +414,14 @@ fn promote_block(project: &str, p: &Value, ctx: &EnvsCtx) -> View {
     for cm in p["commits"].as_array().into_iter().flatten().take(3) {
         row = row.child(details(vec![format!("{} {}", cm["sha"].as_str().unwrap_or(""), cm["subject"].as_str().unwrap_or(""))], tokens::SUBTLE, false));
     }
-    if matches!(ci, "success" | "none") {
+    let merged = ctx.asked.get() && ctx.state.result.as_deref().is_some_and(|r| r.starts_with("merged PR"));
+    if merged {
+        // Ya se fusionó: hasta que llegue el resumen nuevo, el resultado (sin volver a ofrecer deslizar).
+        row = row.child(status_tag(Health::Ok, ctx.state.result.clone().unwrap_or_default()));
+    } else if matches!(ci, "success" | "none") && ctx.asked.get() && ctx.state.waiting {
+        // Pedido: hasta que la Mac (o el sitio) conteste, el deslizador queda bloqueado.
+        row = row.child(theme::slide_busy("Passing to production…"));
+    } else if matches!(ci, "success" | "none") {
         let send = ctx.send.clone();
         let asked = ctx.asked;
         let project = project.to_string();

@@ -173,6 +173,7 @@ const ES: &[(&str, &str)] = &[
     ("Sync", "Sincronización"),
     ("Discard rejected", "Descartar rechazados"),
     ("Last send", "Último envío"),
+    ("Passing to production…", "Pasando a producción…"),
     // Avisos.
     ("Install", "Instalar"),
 ];
