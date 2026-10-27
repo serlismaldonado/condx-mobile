@@ -369,6 +369,45 @@ fn swipe_to_reply(content: View, reply: Signal<ReplyTo>, to: ReplyTo) -> View {
         )
 }
 
+/// Deslizar a la izquierda para archivar (o desarchivar) un hilo de la lista: la fila sigue al dedo y,
+/// pasado un tramo, hace `done`.
+fn swipe_to_archive(content: View, label: String, done: impl Fn() + 'static) -> View {
+    let x = animated_value(0.0);
+    let shift = x.interpolate(&[-96.0, 0.0], &[-96.0, 0.0]);
+    let hint = x.interpolate(&[-64.0, 0.0], &[1.0, 0.0]);
+    view()
+        .child(view().absolute().right(px(16.0)).top(px(0.0)).bottom(px(0.0)).justify_center().bind_opacity(&hint).child(text(label).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::MUTED))))
+        .child(
+            view()
+                .bind_translate_x(&shift)
+                // Solo hacia la izquierda: hacia la derecha falla y el gesto queda para el desplazamiento.
+                .claim_touches(TouchClaim::on_pan(PanActivation { active_offset_x: Some(px(-14.0)), active_offset_y: None, fail_offset_x: Some(px(6.0)), fail_offset_y: Some(px(14.0)) }))
+                .pan_values(Some(&x), None)
+                .on_pan_end(move |e: &PanEvent| {
+                    if e.value_x.unwrap_or(0.0) <= -64.0 {
+                        done();
+                    }
+                    let _ = x.spring(0.0, Spring::default());
+                })
+                .child(content),
+        )
+}
+
+/// Los hilos archivados en este teléfono (solo se esconden aquí; el daemon no se entera).
+pub fn archived_ids() -> Vec<String> {
+    theme::pref("archivedThreads").as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
+fn set_archived(archived: Signal<Vec<String>>, id: &str, on: bool) {
+    let mut ids = archived.get();
+    ids.retain(|i| i != id);
+    if on {
+        ids.push(id.to_string());
+    }
+    theme::set_pref("archivedThreads", serde_json::json!(ids));
+    archived.set(ids);
+}
+
 /// Un color por nombre, siempre el mismo para el mismo agente.
 fn hue(name: &str) -> (u32, u32) {
     // Los agentes de fábrica, siempre con el mismo; lo demás (los flujos), por su nombre.
@@ -770,20 +809,31 @@ fn skeleton() -> View {
     col
 }
 
-pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<String>, loaded: bool, shown: usize) -> View {
+pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<String>, loaded: bool, shown: usize, archived: Signal<Vec<String>>, show_archived: Signal<bool>) -> View {
     if list.is_empty() && !loaded {
         return skeleton();
     }
+    // Los archivados se esconden; abajo, «Archivados» los muestra (y deslizar los devuelve a la lista).
+    let hidden = archived.get();
+    let archived_count = list.iter().filter(|t| hidden.contains(&t.id)).count();
+    let viewing = show_archived.get() && archived_count > 0;
+    let list: Vec<Thread> = list.into_iter().filter(|t| hidden.contains(&t.id) == viewing).collect();
     let more = list.len() > shown;
     let list: Vec<Thread> = list.into_iter().take(shown).collect();
+    let toggle = move |n: usize| -> View {
+        view().items_center().py(px(14.0)).on_press(move || show_archived.set(!show_archived.get())).child(
+            text(if viewing { crate::i18n::t("Back to threads") } else { format!("{} ({n})", crate::i18n::t("Archived")) }).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::MUTED)),
+        )
+    };
     if list.is_empty() {
-        return view().items_center().gap_2().py(px(48.0)).px_4().child(text(crate::i18n::t("No threads yet")).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
+        let empty = view().items_center().gap_2().py(px(48.0)).px_4().child(text(crate::i18n::t("No threads yet")).text_size(px(15.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))).child(
             text(crate::i18n::t("Flows with agents (Condx → Workflows) open one per run. You can follow them and answer here."))
                 .text_size(px(13.0))
                 .line_height(px(19.0))
                 .text_center()
                 .text_color(c(tokens::MUTED)),
         );
+        return if archived_count > 0 { view().child(empty).child(toggle(archived_count)) } else { empty };
     }
     let mut col = view().border_1().border_color(c(tokens::CARD_BORDER)).rounded(px(10.0)).overflow_hidden();
     let n = list.len();
@@ -846,11 +896,16 @@ pub fn list(list: Vec<Thread>, open: Signal<Option<String>>, text_sig: Signal<St
         if ix + 1 < n {
             row = row.border_b_1().border_color(c(tokens::CARD_BORDER));
         }
-        col = col.child(row);
+        let id = t.id.clone();
+        let label = crate::i18n::t(if viewing { "Unarchive" } else { "Archive" });
+        col = col.child(swipe_to_archive(row, label, move || set_archived(archived, &id, !viewing)));
     }
     // Hay más hilos: aparecen al seguir bajando.
     if more {
         col = col.child(view().items_center().py(px(14.0)).bg(c(tokens::CARD)).border_t_1().border_color(c(tokens::CARD_BORDER)).child(live::shimmer("Loading more…", 12.5)));
+    }
+    if archived_count > 0 {
+        return view().child(col).child(toggle(archived_count));
     }
     col
 }

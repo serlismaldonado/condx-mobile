@@ -149,6 +149,9 @@ pub fn App() -> impl IntoElement {
     let loaded = signal(false);
     // Cuántos hilos se muestran: 20 y 20 más al acercarse al final.
     let shown = signal(20usize);
+    // Hilos archivados en este teléfono y si se está viendo ese grupo.
+    let archived = signal(chat::archived_ids());
+    let show_archived = signal(false);
     let thread_open = signal(Option::<String>::None);
     // La fila «_new» (pedir un hilo nuevo) tal como la ve este teléfono.
     let new_thread = signal(Option::<Thread>::None);
@@ -1366,7 +1369,7 @@ pub fn App() -> impl IntoElement {
                                                         if latest.is_some() {
                                                             v = v.child(update_banner(latest));
                                                         }
-                                                        v.child(chat::list(threads.get(), thread_open, thread_text, loaded.get(), shown.get())).into_element()
+                                                        v.child(chat::list(threads.get(), thread_open, thread_text, loaded.get(), shown.get(), archived, show_archived)).into_element()
                                                     }
                                                     }
                                                 }
