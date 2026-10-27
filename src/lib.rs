@@ -86,6 +86,15 @@ pub fn App() -> impl IntoElement {
     theme::apply_scheme(&scheme.get(), false);
     // En qué idioma contestan los agentes (lo configura la Mac).
     let agent_lang = signal(String::new());
+    // Agentes de fuera conectados al MCP remoto (Claude en cualquier lugar): la lista, la URL del conector
+    // y el formulario para conectar otro (nombre, nivel y el código que sale).
+    let mcp_conns = signal(Vec::<(String, String, String, i64)>::new());
+    let mcp_url = signal(String::new());
+    let mcp_loaded = signal(false);
+    let mcp_form = signal(false);
+    let mcp_name = signal("Claude".to_string());
+    let mcp_level = signal("orchestrate");
+    let mcp_code = signal(None::<Result<(String, String), String>>);
     let screen = signal(Screen::Loading);
     // El dueño de la app: las tareas que arranca un botón corren bajo él (las del botón se cancelan
     // cuando ese pedazo de la interfaz se vuelve a dibujar, p. ej. al empezar a grabar).
@@ -161,6 +170,7 @@ pub fn App() -> impl IntoElement {
     let slot: Slot = Arc::new(Mutex::new(None));
     // Para Ajustes (descartar lo que la nube rechazó).
     let slot_settings = slot.clone();
+    let slot_mcp = slot.clone();
     // Vincular: el texto del QR (o solo el código) y la URL del deployment si hace falta.
     let pairing_text = signal(String::new());
     let pairing_url = signal(String::new());
@@ -671,6 +681,8 @@ pub fn App() -> impl IntoElement {
             model_pick: signal(None),
             model_menu: signal(false),
             projects,
+            run: run_send.clone(),
+            run_state,
             // El último proyecto elegido sigue elegido (se cambia en el «+»).
             project_pick: signal(theme::pref("lastProject").as_str().map(str::to_string)),
             photo: std::rc::Rc::new(move || {
@@ -1357,6 +1369,7 @@ pub fn App() -> impl IntoElement {
                                                 let unpair = unpair.clone();
                                                 let run_send = run_send.clone();
                                                 let slot_settings = slot_settings.clone();
+                                                let slot_mcp = slot_mcp.clone();
                                                 move || {
                                                 if tab.get() != "settings" {
                                                     return view().hidden().into_element();
@@ -1400,6 +1413,8 @@ pub fn App() -> impl IntoElement {
                                                         ])
                                                     })
                                                     .child(muted(if lang == "Same as each message" { "Automatic: each agent answers in the language of the message." } else { "Every agent, on the Mac and in the cloud site, answers in this language." }))
+                                                    .child(section("External agents"))
+                                                    .child(mcp_section(slot_mcp.clone(), McpUi { conns: mcp_conns, url: mcp_url, loaded: mcp_loaded, form: mcp_form, name: mcp_name, level: mcp_level, code: mcp_code }))
                                                     .child(section("This phone")).child(
                                                 card().rounded(px(10.0))
                                                     .child(kv("Key", mono(fingerprint.get(), 13.0)))
@@ -1579,4 +1594,117 @@ mod version_tests {
         assert_eq!(super::version_code("0.3.12"), 312);
         assert!(super::version_code("1.0.0") > super::version_code("0.99.99"));
     }
+}
+
+/// Lo que guarda la sección de agentes de fuera (Ajustes).
+#[derive(Clone, Copy)]
+struct McpUi {
+    conns: Signal<Vec<(String, String, String, i64)>>,
+    url: Signal<String>,
+    loaded: Signal<bool>,
+    form: Signal<bool>,
+    name: Signal<String>,
+    level: Signal<&'static str>,
+    code: Signal<Option<Result<(String, String), String>>>,
+}
+
+/// Agentes de fuera (Claude Desktop en otra computadora, la web o el teléfono) conectados al MCP remoto
+/// de Condx Cloud: quiénes están, desconectarlos y conectar otro con un código que firma este teléfono.
+fn mcp_section(slot: Slot, ui: McpUi) -> AnyElement {
+    let reload = {
+        let slot = slot.clone();
+        move || {
+            let slot = slot.clone();
+            spawn(async move {
+                if let Some(Ok((url, list))) = with_phone(&slot, |p| p.mcp_connections()).await {
+                    ui.url.set(url);
+                    ui.conns.set(list);
+                }
+            });
+        }
+    };
+    if !ui.loaded.get() {
+        ui.loaded.set(true);
+        reload();
+    }
+    dynamic(move || {
+        let mut col = card().rounded(px(10.0)).gap(px(10.0));
+        let list = ui.conns.get();
+        if list.is_empty() {
+            col = col.child(theme::muted("Connect Claude (or another agent) to work on your projects from anywhere, even with the Mac off."));
+        }
+        for (id, name, level, last) in list {
+            let level_label = match level.as_str() {
+                "orchestrate" => crate::i18n::tr("orchestrates".into(), "orquesta".into()),
+                "reply" => crate::i18n::tr("reads and replies".into(), "lee y responde".into()),
+                _ => crate::i18n::tr("reads".into(), "lee".into()),
+            };
+            let seen = if last > 0 { theme::ago(last) } else { crate::i18n::tr("not used yet".into(), "sin usar todavía".into()) };
+            let (slot, reload) = (slot.clone(), reload.clone());
+            col = col.child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .child(view().flex_1().gap(px(2.0)).child(text(name).text_size(px(14.0)).text_color(c(tokens::FG))).child(text(format!("{level_label} · {seen}")).text_size(px(12.0)).text_color(c(tokens::MUTED))))
+                    .child(theme::small_button("Disconnect", Variant::Outline, move || {
+                        let (slot, id, reload) = (slot.clone(), id.clone(), reload.clone());
+                        spawn(async move {
+                            let _ = with_phone(&slot, move |p| p.mcp_disconnect(&id)).await;
+                            reload();
+                        });
+                    })),
+            );
+        }
+        match ui.code.get() {
+            Some(Ok((code, url))) => {
+                col = col
+                    .child(view().h(px(1.0)).bg(c(tokens::CARD_BORDER)))
+                    .child(theme::muted("In Claude: Settings → Connectors → Add custom connector, paste this URL and, when it asks to authorize, type the code (valid 10 minutes, once)."))
+                    .child(text(url).font_family(theme::MONO_FONT).text_size(px(13.0)).text_color(c(tokens::FG)).selectable(true))
+                    .child(text(code).font_family(theme::MONO_FONT).text_size(px(30.0)).font_weight(FontWeight::SEMIBOLD).text_color(c(tokens::ACCENT)).selectable(true))
+                    .child(view().flex_row().child(theme::small_button("Done", Variant::Outline, {
+                        let reload = reload.clone();
+                        move || {
+                            ui.code.set(None);
+                            ui.form.set(false);
+                            reload();
+                        }
+                    })));
+            }
+            Some(Err(e)) => col = col.child(text(e).number_of_lines(3u32).text_size(px(12.5)).text_color(c(tokens::DANGER))),
+            None => {}
+        }
+        if ui.form.get() && !matches!(ui.code.get(), Some(Ok(_))) {
+            let pick = |l: &'static str| -> Box<dyn Fn()> { Box::new(move || ui.level.set(l)) };
+            let now = ui.level.get();
+            let slot = slot.clone();
+            col = col
+                .child(theme::field("Name (e.g. Claude)", ui.name))
+                .child(theme::segmented(vec![("Orchestrate", 0, now == "orchestrate", pick("orchestrate")), ("Reply", 0, now == "reply", pick("reply")), ("Read", 0, now == "read", pick("read"))]))
+                .child(theme::muted(match now {
+                    "orchestrate" => "Reads and writes in threads, calls Condx's agents, starts chats, tasks and flows. Never approves, touches production or reads keys.",
+                    "reply" => "Reads threads and answers where you mention it.",
+                    _ => "Only reads.",
+                }))
+                .child(view().flex_row().child(theme::small_button("Create code", Variant::Primary, move || {
+                    let slot = slot.clone();
+                    let (name, level) = (ui.name.get(), ui.level.get());
+                    if name.trim().is_empty() {
+                        return;
+                    }
+                    spawn(async move {
+                        let r = with_phone(&slot, move |p| p.mcp_connect(&name, level)).await.unwrap_or_else(|| Err("not paired".into()));
+                        ui.code.set(Some(r));
+                    });
+                })));
+        } else if !ui.form.get() {
+            col = col.child(view().flex_row().child(theme::small_button("Connect an agent", Variant::Outline, move || {
+                ui.code.set(None);
+                ui.form.set(true);
+            })));
+        }
+        col.into_element()
+    })
+    .into_element()
 }

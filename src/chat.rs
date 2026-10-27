@@ -163,6 +163,17 @@ pub struct Composer {
     /// Los proyectos de la Mac y en cuál trabaja el próximo hilo nuevo (el «+», como en Claude).
     pub projects: Signal<Vec<String>>,
     pub project_pick: Signal<Option<String>>,
+    /// Pedidos firmados a la Mac o al sitio (`_run`) y su resultado: subir a dev la rama de una tarea.
+    pub run: Rc<dyn Fn(Value)>,
+    pub run_state: Signal<crate::sync::RunState>,
+}
+
+/// La rama de un agente que dejó la tarea del hilo (`condx/fix-…`, en los campos de su tarjeta).
+fn task_branch(t: &Thread) -> Option<String> {
+    t.items.iter().rev().filter_map(|i| i["text"].as_str()).find_map(|text| {
+        let at = text.find("condx/fix-")?;
+        Some(text[at..].chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '/' || *c == '_').collect())
+    })
 }
 
 /// A qué agente va el texto (la mención del principio) y su modelo y modelos; sin mención, los
@@ -1161,6 +1172,36 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .into_element(),
                     None => view().into_element(),
                 }))
+                // Una tarea terminada: subir su rama a dev con un deslizador (firmado por este teléfono;
+                // lo hace la Mac o, apagada, el sitio: PR y fusión por GitHub). Producción sigue aparte.
+                .child({
+                    let current = current.clone();
+                    let (run, run_state) = (composer.run.clone(), composer.run_state);
+                    let asked = signal(None::<String>);
+                    dynamic(move || {
+                        let Some(t) = current() else { return view().into_element() };
+                        let Some(branch) = task_branch(&t).filter(|_| t.kind == "flow" && t.status == "succeeded") else { return view().into_element() };
+                        let project = t.project.clone().unwrap_or_default();
+                        let st = run_state.get();
+                        let mine = asked.get().as_deref() == Some(branch.as_str());
+                        let mut row = view().mx_3().mt_2().gap(px(6.0));
+                        if mine && st.waiting {
+                            row = row.child(theme::slide_busy("Merging into dev…"));
+                        } else if mine && st.result.is_some() {
+                            let r = st.result.clone().unwrap_or_default();
+                            let ok = r.starts_with("merged PR");
+                            row = row.child(theme::status_tag(if ok { Health::Ok } else { Health::Bad }, crate::i18n::daemon_text(&r)));
+                        } else {
+                            let run = run.clone();
+                            let b = branch.clone();
+                            row = row.child(theme::slide_to_confirm(crate::i18n::tr(format!("Slide to merge {branch} into dev"), format!("Desliza para subir {branch} a dev")), move || {
+                                asked.set(Some(b.clone()));
+                                run(serde_json::json!({ "merge": { "project": project.clone(), "branch": b.clone() } }));
+                            }));
+                        }
+                        row.into_element()
+                    })
+                })
                 .child(dynamic(chips_row))
                 // Elegir otro modelo para el próximo mensaje (los del proveedor del agente).
                 .child(dynamic(move || {

@@ -757,6 +757,46 @@ impl Phone {
         self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("recipient")?.as_str()?.parse().ok()
     }
 
+    /// Conecta un agente de fuera (Claude en cualquier lugar) al MCP remoto de Condx Cloud: un código
+    /// para escribir al autorizar y un permiso firmado con la llave de este teléfono (la Mac y el sitio
+    /// lo verifican en cada llamada). Devuelve el código (`K7QF-2M9P`) y la URL del conector.
+    pub fn mcp_connect(&self, name: &str, level: &str) -> Result<(String, String), String> {
+        use sha2::{Digest, Sha256};
+        const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+        let mut raw = [0u8; 8];
+        rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut raw);
+        let code: String = raw.iter().map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char).collect();
+        let code_hash = hex(&Sha256::digest(code.as_bytes()));
+        let grant_id = random_hex(10);
+        let name = name.trim();
+        let signed_at = now_ms();
+        let message = format!("condx-mcp-grant:v1|{}|{grant_id}|{name}|{level}|{code_hash}|{signed_at}", self.daemon_id);
+        let signature = hex(&self.key.sign(message.as_bytes()).to_bytes());
+        let body = json!({ "grantId": grant_id, "name": name, "level": level, "codeHash": code_hash, "signedAt": signed_at, "signature": signature });
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20)).build();
+        let reply: Value = match agent.post(&format!("{}/mcp/grants", site_url(&self.url))).set("Authorization", &format!("Bearer {}", self.token)).send_json(body) {
+            Ok(r) => r.into_json().map_err(|e| e.to_string())?,
+            Err(ureq::Error::Status(404, _)) => return Err("Condx Cloud doesn't have the remote MCP yet: deploy it from the Mac".into()),
+            Err(ureq::Error::Status(code, r)) => return Err(format!("Condx Cloud answered {code}: {}", r.into_string().unwrap_or_default().chars().take(120).collect::<String>())),
+            Err(e) => return Err(format!("couldn't reach Condx Cloud: {e}")),
+        };
+        Ok((format!("{}-{}", &code[..4], &code[4..]), reply["url"].as_str().unwrap_or_default().to_string()))
+    }
+
+    /// Los agentes conectados al MCP remoto: (permiso, nombre, nivel, última vez) y la URL del conector.
+    pub fn mcp_connections(&self) -> Result<(String, Vec<(String, String, String, i64)>), String> {
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20)).build();
+        let v: Value = agent.get(&format!("{}/mcp/grants", site_url(&self.url))).set("Authorization", &format!("Bearer {}", self.token)).call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
+        let list = v["grants"].as_array().cloned().unwrap_or_default().iter().filter_map(|g| Some((g["grantId"].as_str()?.to_string(), g["name"].as_str()?.to_string(), g["level"].as_str().unwrap_or("").to_string(), g["lastUsedAt"].as_i64().unwrap_or(0)))).collect();
+        Ok((v["url"].as_str().unwrap_or_default().to_string(), list))
+    }
+
+    pub fn mcp_disconnect(&self, grant_id: &str) -> Result<(), String> {
+        let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(20)).build();
+        agent.delete(&format!("{}/mcp/grants/{grant_id}", site_url(&self.url))).set("Authorization", &format!("Bearer {}", self.token)).call().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Cifra el archivo para la Mac (la nube no puede leerlo) y lo sube a `/files`; devuelve su id.
     pub fn upload(&self, bytes: &[u8]) -> Result<String, String> {
         let mac = self.mac_recipient().ok_or("the Mac hasn't published its key yet: update Condx on the Mac")?;
