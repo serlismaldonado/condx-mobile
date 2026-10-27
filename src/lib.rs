@@ -718,6 +718,18 @@ pub fn App() -> impl IntoElement {
                     }
                 }));
             }),
+            resend: {
+                let slot = slot.clone();
+                std::rc::Rc::new(move |tid: String| {
+                    let slot = slot.clone();
+                    spawn(async move {
+                        let sent = with_phone(&slot, move |p| p.refresh_requests(true, Some(&tid))).await.unwrap_or(0);
+                        if sent == 0 {
+                            status.set("There was nothing to resend in this thread.".into());
+                        }
+                    });
+                })
+            },
             file: std::rc::Rc::new(move || {
                 let add = add_picked.clone();
                 app_owner.run(|| spawn(async move {

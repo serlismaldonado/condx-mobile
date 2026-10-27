@@ -149,6 +149,8 @@ pub struct Composer {
     pub photo: Rc<dyn Fn()>,
     /// Elegir un archivo del teléfono (el selector del sistema).
     pub file: Rc<dyn Fn()>,
+    /// Reenviar el último mensaje de un hilo que no se pudo entregar (lo vuelve a firmar).
+    pub resend: Rc<dyn Fn(String)>,
     pub mic: Rc<dyn Fn()>,
     /// Termina la grabación: `true` la manda, `false` la descarta.
     pub stop: Rc<dyn Fn(bool)>,
@@ -423,6 +425,70 @@ fn span(ms: i64) -> String {
 /// Lo que hizo un agente antes de responder (lo que pensó, lo que dijo mientras trabajaba y las
 /// herramientas que usó, con lo que devolvieron), plegado bajo una línea como en Claude: abierto
 /// mientras trabaja, cerrado cuando ya respondió; un toque lo invierte.
+/// «Ver cambios»: lo que cambió un agente que escribe (su rama): archivos y el diff, plegado.
+fn change_block(change: &Value) -> AnyElement {
+    let commit = change["commit"].as_str().unwrap_or_default().to_string();
+    let branch = change["branch"].as_str().unwrap_or_default().to_string();
+    let files = change["files"].as_u64().unwrap_or(0);
+    let stat = change["stat"].as_str().unwrap_or_default().trim().to_string();
+    let patch = change["patch"].as_str().map(str::to_string);
+    let key = format!("change:{commit}");
+    dynamic(move || {
+        let open = global::<live::StepsOpen>().get().0.get(&key).copied().unwrap_or(false);
+        let label = match files {
+            0 => crate::i18n::t("See changes"),
+            1 => crate::i18n::tr("See changes · 1 file".into(), "Ver cambios · 1 archivo".into()),
+            n => crate::i18n::tr(format!("See changes · {n} files"), format!("Ver cambios · {n} archivos")),
+        };
+        let k = key.clone();
+        let head = view()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .py(px(4.0))
+            .child(theme::icon(if open { theme::CHEVRON_DOWN } else { theme::CHEVRON_RIGHT }, tokens::ACCENT, 14.0))
+            .child(text(label).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ACCENT)))
+            .on_press(move || {
+                let mut m = global::<live::StepsOpen>().get();
+                let now = m.0.get(&k).copied().unwrap_or(false);
+                m.0.insert(k.clone(), !now);
+                global::<live::StepsOpen>().set(m);
+            });
+        let mut col = view().gap(px(6.0)).child(head);
+        if open {
+            let mono = |s: String, color| text(s).font_family("monospace").text_size(px(11.5)).line_height(px(16.0)).text_color(c(color));
+            col = col.child(mono(format!("{} · {}", &commit, &branch), tokens::SUBTLE));
+            if !stat.is_empty() {
+                col = col.child(mono(stat.clone(), tokens::MUTED));
+            }
+            match &patch {
+                Some(p) if !p.is_empty() => {
+                    // Las líneas del diff con su color: agregadas, quitadas y los encabezados.
+                    let mut lines = view().gap(px(0.0));
+                    for l in p.lines().take(600) {
+                        let color = if l.starts_with("+++") || l.starts_with("---") || l.starts_with("diff ") || l.starts_with("index ") {
+                            tokens::SUBTLE
+                        } else if l.starts_with('+') {
+                            tokens::SUCCESS
+                        } else if l.starts_with('-') {
+                            tokens::DANGER
+                        } else if l.starts_with("@@") {
+                            tokens::ACCENT
+                        } else {
+                            tokens::FG
+                        };
+                        lines = lines.child(mono(if l.is_empty() { " ".to_string() } else { l.to_string() }, color));
+                    }
+                    col = col.child(scroll().horizontal().child(view().px_2().py_2().rounded(px(8.0)).bg(c(tokens::PANEL)).border_1().border_color(c(tokens::CARD_BORDER)).child(lines)));
+                }
+                _ => col = col.child(text(crate::i18n::t("The diff is on the branch (only the latest changes of a thread carry it).")).text_size(px(12.0)).text_color(c(tokens::MUTED))),
+            }
+        }
+        col.into_element()
+    })
+    .into_element()
+}
+
 fn steps_block(name: &str, it: &Value) -> AnyElement {
     let steps: Vec<Value> = it["steps"].as_array().cloned().unwrap_or_default();
     let live = it["live"] == true;
@@ -723,7 +789,9 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                     live_body(&name, it, it["steps"].as_array().is_none_or(|s| s.is_empty()))
                 } else {
                     view().px_3().py(px(10.0)).rounded(px(14.0)).rounded_tl(px(4.0)).bg(c(tokens::HOVER)).child(agent_body(&body)).into_element()
-                });
+                })
+                // Lo que cambió (un agente que escribe): para verlo antes de subirlo a dev.
+                .child(if it["change"].is_object() { change_block(&it["change"]) } else { view().into_element() });
             // Mantener presionado también responde; con código adentro es la única forma (el gesto
             // lateral es del código o de la tabla, que se desplazan).
             // Al responder va el mensaje entero (la cita completa), no solo el comienzo.
@@ -986,6 +1054,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
     let chips_row = {
         let current = current.clone();
         let catalog = composer.catalog;
+        let resend = composer.resend.clone();
         move || -> AnyElement {
             let Some(t) = current() else { return view().into_element() };
             let mut chips = view().flex_row().gap_2().px_3().pt_2();
@@ -1042,7 +1111,19 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
             view()
                 .child(if !anyone { view().into_element() } else { scroll().horizontal().keyboard_taps(KeyboardTaps::Handled).child(chips).into_element() })
                 .child(match delivery {
-                    Some((h, label)) => view().px_4().pt_2().child(theme::status_tag(h, label)).into_element(),
+                    Some((h, label)) => {
+                        let (resend, tid) = (resend.clone(), t.id.clone());
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_3()
+                            .px_4()
+                            .pt_2()
+                            .child(view().flex_1().child(theme::status_tag(h, label)))
+                            // El mismo mensaje otra vez (firmado ahora): sin escribirlo de nuevo.
+                            .child(view().px_3().h(px(32.0)).justify_center().rounded(px(16.0)).border_1().border_color(c(tokens::ACCENT)).on_press(move || resend(tid.clone())).child(text(crate::i18n::t("Resend")).text_size(px(13.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::ACCENT))))
+                            .into_element()
+                    }
                     None => view().into_element(),
                 })
                 .into_element()

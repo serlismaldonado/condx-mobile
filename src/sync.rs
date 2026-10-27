@@ -397,7 +397,65 @@ impl Phone {
             None => {}
         }
         block_on(sync_once(&mut self.engine, &self.transport, now_ms, 50)).map_err(|e| e.to_string())?;
+        if self.refresh_requests(false, None) > 0 {
+            let _ = block_on(sync_once(&mut self.engine, &self.transport, now_ms, 50));
+        }
         Ok(self.approvals())
+    }
+
+    /// Los mensajes de este teléfono que nadie tomó (la Mac dormida, la nube reiniciándose): la Mac y
+    /// la nube rechazan un pedido firmado hace más de 10 minutos, así que antes de eso se vuelve a
+    /// firmar (el mismo texto y adjuntos, con la hora de ahora); uno que llegó tarde («stale», «too
+    /// late») sale otra vez. Durante 6 horas. `force` (el botón Reenviar): ya, en `only` o en todos.
+    pub fn refresh_requests(&mut self, force: bool, only: Option<&str>) -> usize {
+        const REFRESH_MS: i64 = 7 * 60_000;
+        const GIVE_UP_MS: i64 = 6 * 3_600_000;
+        let mine = hex(self.key.verifying_key().as_bytes());
+        let now = now_ms();
+        let mut drafts = vec![];
+        for r in self.engine.rows(&self.threads_scope) {
+            let v = &r.row.values;
+            if r.pending || only.is_some_and(|o| o != r.row.id) {
+                continue;
+            }
+            if v.get("deviceKey").and_then(Value::as_str) != Some(mine.as_str()) || v.get("request").and_then(Value::as_str) != Some("message") {
+                continue;
+            }
+            let Some(rid) = v.get("requestId").and_then(Value::as_str) else { continue };
+            let at = v.get("requestedAt").and_then(Value::as_i64).unwrap_or(0);
+            let for_it = |f: &str| v.get(f).and_then(Value::as_str) == Some(rid);
+            let said = |f: &str| v.get(f).and_then(Value::as_str).unwrap_or_default().to_string();
+            let late = |x: String| x.contains("stale") || x.contains("too late");
+            let rejected_late = (for_it("resultFor") && late(said("result"))) || (for_it("siteFor") && late(said("siteResult")));
+            let rejected = (for_it("resultFor") && said("result").starts_with("rejected")) || (for_it("siteFor") && said("siteResult").starts_with("rejected"));
+            let waiting = !for_it("resultFor") && !for_it("siteFor");
+            let due = (waiting && now - at > REFRESH_MS) || rejected_late;
+            if !(force && (waiting || rejected)) && !(due && now - at < GIVE_UP_MS) {
+                continue;
+            }
+            let text = said("requestArg");
+            let files = v.get("requestFiles").and_then(Value::as_str).filter(|f| !f.is_empty()).map(str::to_string);
+            let signed = match &files {
+                Some(f) => format!("{text}\u{1f}{f}"),
+                None => text.clone(),
+            };
+            let request_id = random_hex(8);
+            let signature = self.key.sign(thread_message(&self.daemon_id, &r.row.id, &request_id, now, &signed).as_bytes());
+            let mut set = Values::new();
+            set.insert("request".into(), json!("message"));
+            set.insert("requestArg".into(), json!(text));
+            set.insert("requestFiles".into(), files.map(Value::String).unwrap_or(Value::Null));
+            set.insert("requestId".into(), json!(request_id));
+            set.insert("requestedAt".into(), json!(now));
+            set.insert("deviceKey".into(), json!(mine.clone()));
+            set.insert("signature".into(), json!(hex(&signature.to_bytes())));
+            drafts.push(OpDraft::patch(&self.threads_scope, &r.row.id, set));
+        }
+        let n = drafts.len();
+        if n > 0 {
+            let _ = self.engine.commit(drafts, now);
+        }
+        n
     }
 
     pub fn approvals(&self) -> Vec<Approval> {
@@ -520,7 +578,8 @@ impl Phone {
                     waiting_answer: v.get("waitingAnswer").and_then(Value::as_bool).unwrap_or(false),
                     project: v.get("project").and_then(Value::as_str).map(str::to_string),
                     env: v.get("env").and_then(Value::as_str).map(str::to_string),
-                    result: if by_site { Some("answered by the cloud site".to_string()).filter(|_| own) } else { v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string) },
+                    // Lo que hizo el sitio: un rechazo se muestra tal cual (para reenviarlo).
+                    result: if by_site { Some(v.get("siteResult").and_then(Value::as_str).filter(|r| r.starts_with("rejected")).map(str::to_string).unwrap_or_else(|| "answered by the cloud site".to_string())).filter(|_| own) } else { v.get("result").and_then(Value::as_str).filter(|_| own || answered).map(str::to_string) },
                     waiting: own && (r.pending || !answered),
                     sending: v.get("requestArg").and_then(Value::as_str).filter(|_| own && (r.pending || !answered)).map(str::to_string),
                     delivered: own && !r.pending && !answered,
