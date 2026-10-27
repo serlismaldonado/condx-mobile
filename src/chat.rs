@@ -183,8 +183,9 @@ pub enum Presence {
 /// El ícono chico de quién contesta, en la esquina del cuadro de escribir (sin palabras).
 pub fn presence_icon(p: Presence) -> AnyElement {
     let (icon, color) = match p {
-        Presence::Mac => (theme::LAPTOP, tokens::SUCCESS),
-        Presence::Cloud => (theme::CLOUD, tokens::INFO),
+        // En el amarillo de la marca, apagado: dice quién contesta sin competir con el texto.
+        Presence::Mac => (theme::LAPTOP, tokens::ACCENT_SOFT),
+        Presence::Cloud => (theme::CLOUD, tokens::ACCENT_SOFT),
         Presence::Offline => (theme::CLOUD, tokens::DANGER),
     };
     theme::icon(icon, color, 14.0).into_element()
@@ -918,6 +919,8 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
     };
     let files = composer.files;
     let (agent_models, default_models, model_pick, model_menu) = (composer.agent_models, composer.default_models, composer.model_pick, composer.model_menu);
+    // El anillo del contexto: tocarlo muestra cuánto («45k / 200k · 22%»).
+    let context_label = signal(false);
     let do_send = move || {
         let mut msg = text_sig.get().trim().to_string();
         let pending = files.get();
@@ -1173,10 +1176,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                         .rounded(px(22.0))
                         .border_1()
                         .border_color(c(tokens::CARD_BORDER))
-                        .bg(c(tokens::RAISED))
-                        // Quién contesta, en la esquina: laptop verde (la Mac), nube azul (el sitio en la
-                        // nube) o nube roja (sin conexión).
-                        .child(view().absolute().top(px(17.0)).right(px(16.0)).child(dynamic(move || presence_icon(presence.get()))));
+                        .bg(c(tokens::RAISED));
                     let round = |size: f32| view().w(px(size)).h(px(size)).rounded(px(size / 2.0)).items_center().justify_center();
                     if let Some(secs) = composer.recording.get() {
                         return card
@@ -1207,8 +1207,6 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             // Varias líneas: Enter agrega una línea; se manda con el botón.
                             .multiline(true)
                             .px(px(6.0))
-                            // A la derecha, lugar para el ícono de quién contesta.
-                            .pr(px(28.0))
                             .py(px(4.0))
                             .min_h(px(36.0))
                             .max_h(px(160.0))
@@ -1245,7 +1243,30 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                     .child(text(shown).number_of_lines(1u32).text_size(px(12.0)).font_family(theme::MONO_FONT).text_color(c(if changed { tokens::FG } else { tokens::MUTED })))
                                     .into_element()
                             }))
+                            // Cuánto contexto usa el agente del hilo (como el anillo de Claude Code): tocarlo dice cuánto.
+                            .child({
+                                let current = current.clone();
+                                dynamic(move || {
+                                    let Some((used, window)) = current().and_then(|t| t.context) else { return view().into_element() };
+                                    let shown = context_label.get();
+                                    let frac = if window > 0 { used as f32 / window as f32 } else { 0.0 };
+                                    let k = |n: u64| if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) } else { format!("{}k", (n + 500) / 1000) };
+                                    let label = if window > 0 { format!("{} / {} · {}%", k(used), k(window), (frac * 100.0).round() as u32) } else { k(used) };
+                                    view()
+                                        .flex_row()
+                                        .gap(px(5.0))
+                                        .items_center()
+                                        .h(px(30.0))
+                                        .px(px(4.0))
+                                        .on_press(move || context_label.set(!context_label.get()))
+                                        .child(theme::context_ring(frac, 17.0))
+                                        .child(if shown { text(label).text_size(px(11.5)).font_family(theme::MONO_FONT).text_color(c(tokens::MUTED)).into_element() } else { view().into_element() })
+                                        .into_element()
+                                })
+                            })
                             .child(view().flex_1())
+                            // Quién contesta: la Mac, el sitio en la nube o nadie (sin conexión).
+                            .child(view().pr(px(6.0)).child(dynamic(move || presence_icon(presence.get()))))
                             // Enviar; con el campo vacío y nada adjunto, grabar una nota de voz.
                             .child(dynamic(move || {
                                 let empty = text_sig.get().trim().is_empty() && !ready;

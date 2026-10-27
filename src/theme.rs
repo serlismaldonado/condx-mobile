@@ -36,6 +36,8 @@ pub mod tokens {
     pub const SUBTLE: (u32, u32) = tone(0x8c8c8c, 0x6b6b6b);
     /// Amarillo de la marca (#F3B01C), para rellenos.
     pub const ACCENT: (u32, u32) = tone(0xf3b01c, 0xf3b01c);
+    /// El amarillo de la marca, apagado: indicadores que no deben llamar la atención (quién contesta).
+    pub const ACCENT_SOFT: (u32, u32) = tone(0xc49a3a, 0x9c7f3c);
     /// Texto sobre el amarillo (9,5:1).
     pub const ON_ACCENT: (u32, u32) = tone(0x1f1503, 0x1f1503);
     /// Estados (los de GPUI Kit en la app de escritorio).
@@ -333,6 +335,25 @@ pub fn icon(paths: &'static [&'static str], color: (u32, u32), size: f32) -> Can
             p = p.stroke_svg(d);
         }
         p
+    })
+    .w(px(size))
+    .h(px(size))
+}
+
+/// Cuánto contexto usa el agente: un anillo (como el de Claude Code), el círculo entero apagado y lo usado
+/// encima, desde arriba en el sentido del reloj. `frac` entre 0 y 1.
+pub fn context_ring(frac: f32, size: f32) -> CanvasView {
+    let f = frac.clamp(0.0, 1.0);
+    let color = if f >= 0.9 { tokens::DANGER } else if f >= 0.75 { tokens::WARNING } else { tokens::MUTED };
+    let (cx, r) = (12.0f32, 8.5f32);
+    let circle = format!("M{cx} {} A{r} {r} 0 1 1 {cx} {} A{r} {r} 0 1 1 {cx} {}", cx - r, cx + r, cx - r);
+    let a = f * std::f32::consts::TAU;
+    let (x, y) = (cx + r * a.sin(), cx - r * a.cos());
+    let arc = if f >= 0.999 { circle.clone() } else { format!("M{cx} {} A{r} {r} 0 {} 1 {x:.2} {y:.2}", cx - r, if f > 0.5 { 1 } else { 0 }) };
+    let k = size / 24.0;
+    canvas(move || {
+        let p = Painter::new().scale(k, k).line_width(2.6).line_cap(nsh_core::canvas::LineCap::Round).stroke_style(now(tokens::CARD_BORDER)).stroke_svg(&circle);
+        if f > 0.0 { p.stroke_style(now(color)).stroke_svg(&arc) } else { p }
     })
     .w(px(size))
     .h(px(size))

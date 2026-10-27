@@ -1500,7 +1500,7 @@ pub fn App() -> impl IntoElement {
                                                 let id = id.clone();
                                                 std::rc::Rc::new(move || {
                                                     if id == "_new" {
-                                                        Some(new_thread.get().unwrap_or_else(|| Thread { id: "_new".into(), title: crate::i18n::t("New thread"), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result: None, waiting: false, sending: None, delivered: false, read: false }))
+                                                        Some(new_thread.get().unwrap_or_else(|| Thread { id: "_new".into(), title: crate::i18n::t("New thread"), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result: None, waiting: false, sending: None, delivered: false, read: false, context: None }))
                                                     } else {
                                                         threads.get().into_iter().find(|t| t.id == id)
                                                     }

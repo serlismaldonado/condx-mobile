@@ -144,6 +144,8 @@ pub struct Thread {
     pub delivered: bool,
     /// El último mensaje de este teléfono ya lo tomó un agente (la Mac o el sitio en la nube): ✓✓.
     pub read: bool,
+    /// Cuánto contexto usa su agente (tokens de la última llamada) y la ventana de su modelo (0: no se sabe).
+    pub context: Option<(u64, u64)>,
 }
 
 /// Un adjunto subido: lo que el mensaje dice de él (el daemon lo baja con `id`).
@@ -523,6 +525,7 @@ impl Phone {
                     sending: v.get("requestArg").and_then(Value::as_str).filter(|_| own && (r.pending || !answered)).map(str::to_string),
                     delivered: own && !r.pending && !answered,
                     read: own && answered,
+                    context: v.get("context").and_then(Value::as_str).and_then(|t| serde_json::from_str::<Value>(t).ok()).and_then(|c| Some((c["used"].as_u64()?, c["window"].as_u64().unwrap_or(0)))),
                 }
             })
             .collect();
@@ -563,7 +566,7 @@ impl Phone {
             sending = v.get("requestArg").and_then(Value::as_str).filter(|_| waiting).map(str::to_string);
             delivered = own && !r.pending && !answered;
         }
-        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false }
+        Thread { id: "_new".into(), title: "New thread".into(), kind: "chat".into(), status: String::new(), updated_at: 0, items: vec![], participants: vec![], waiting_answer: false, project: None, env: None, result, waiting, sending, delivered, read: false, context: None }
     }
 
     /// El catálogo de agentes que publica el daemon (fila `_agents`): (id, nombre, marca del proveedor).
