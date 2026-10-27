@@ -130,6 +130,9 @@ pub fn App() -> impl IntoElement {
     let deploy_direct = signal(false);
     // Hilos (F6): las corridas de los flujos con sus agentes; el que está abierto y lo que se escribe.
     let threads = signal(Vec::<Thread>::new());
+    // Los avisos recientes (la campana) y hasta cuándo se vieron.
+    let notifs = signal(Vec::<serde_json::Value>::new());
+    let notifs_seen = signal(theme::pref("notifSeen").as_i64().unwrap_or(0));
     // Los entornos y los trabajos recientes de la Mac (solo lectura) y el trabajo abierto.
     let envs = signal(Vec::<sync::Env>::new());
     let jobs = signal(Vec::<sync::Job>::new());
@@ -321,6 +324,10 @@ pub fn App() -> impl IntoElement {
                                 if !loaded.get() {
                                     loaded.set(true);
                                 }
+                                if let Some(ns) = with_phone(&slot, |p| p.notifications()).await
+                                    && notifs.get() != ns {
+                                        notifs.set(ns);
+                                    }
                                 if let Some(cat) = with_phone(&slot, |p| p.catalog()).await
                                     && catalog.get() != cat {
                                         catalog.set(cat);
@@ -1222,6 +1229,32 @@ pub fn App() -> impl IntoElement {
             // Quién contesta (laptop verde: la Mac; nube azul: el sitio en la nube; nube roja: sin
             // conexión), como en el cuadro de escribir, y los ajustes.
             .child(dynamic(move || if screen.get() == Screen::Ready { chat::presence_icon(presence.get()) } else { view().into_element() }))
+            // La campana: los avisos (los mismos que suenan por ntfy y en la Mac), con un punto si hay nuevos.
+            .child(dynamic(move || {
+                if screen.get() != Screen::Ready {
+                    return view().into_element();
+                }
+                let newest = notifs.get().first().and_then(|n| n["at"].as_i64()).unwrap_or(0);
+                let unseen = newest > notifs_seen.get();
+                let on = tab.get() == "notifications";
+                view()
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(16.0))
+                    .active(|s| s.bg(c(tokens::ACTIVE)))
+                    .on_press(move || {
+                        thread_open.set(None);
+                        tab.set(if tab.get() == "notifications" { "threads" } else { "notifications" });
+                        let now = sync::now_ms();
+                        notifs_seen.set(now);
+                        theme::set_pref("notifSeen", serde_json::json!(now));
+                    })
+                    .child(theme::icon(theme::BELL, if on { tokens::FG } else { tokens::MUTED }, 18.0))
+                    .child(if unseen { view().absolute().top(px(5.0)).right(px(6.0)).w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(c(tokens::ACCENT)).into_element() } else { view().into_element() })
+                    .into_element()
+            }))
             .child(dynamic(move || {
                 if screen.get() != Screen::Ready {
                     return view().into_element();
@@ -1328,6 +1361,68 @@ pub fn App() -> impl IntoElement {
                                                     .child(text("‹").text_size(px(22.0)).text_color(c(tokens::FG)))
                                                     .child(text(crate::i18n::t("Settings")).text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
                                                     .into_element()
+                                            }))
+                                            // Notificaciones: lo último que pasó; tocar una lleva a su hilo, incidente o aprobación.
+                                            .child(dynamic(move || {
+                                                if tab.get() != "notifications" {
+                                                    return view().hidden().into_element();
+                                                }
+                                                let mut col = view().gap_2().child(
+                                                    view()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .on_press(move || tab.set("threads"))
+                                                        .child(text("‹").text_size(px(22.0)).text_color(c(tokens::FG)))
+                                                        .child(text(crate::i18n::t("Notifications")).text_size(px(16.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG))),
+                                                );
+                                                let list = notifs.get();
+                                                if list.is_empty() {
+                                                    return col.child(theme::muted("Nothing yet: agent replies, incidents and approvals show up here.")).into_element();
+                                                }
+                                                for n in list {
+                                                    let title = n["title"].as_str().unwrap_or_default().to_string();
+                                                    let body = n["body"].as_str().unwrap_or_default().to_string();
+                                                    let at = n["at"].as_i64().unwrap_or(0);
+                                                    let (thread, kind) = (n["thread"].as_str().map(str::to_string), n["kind"].as_str().unwrap_or_default().to_string());
+                                                    let incident = n["incident"].is_string();
+                                                    let color = match kind.as_str() {
+                                                        "incident" => tokens::DANGER,
+                                                        "approval" => tokens::WARNING,
+                                                        _ => tokens::ACCENT,
+                                                    };
+                                                    col = col.child(
+                                                        view()
+                                                            .flex_row()
+                                                            .gap_3()
+                                                            .px_3()
+                                                            .py(px(10.0))
+                                                            .rounded(px(10.0))
+                                                            .border_1()
+                                                            .border_color(c(tokens::CARD_BORDER))
+                                                            .bg(c(tokens::PANEL))
+                                                            .active(|s| s.bg(c(tokens::ACTIVE)))
+                                                            .on_press(move || match (&thread, kind.as_str(), incident) {
+                                                                (Some(id), _, _) => {
+                                                                    tab.set("threads");
+                                                                    thread_open.set(Some(id.clone()));
+                                                                }
+                                                                (None, "approval", _) => tab.set("approvals"),
+                                                                (None, _, true) | (None, "incident", _) => tab.set("incidents"),
+                                                                _ => tab.set("threads"),
+                                                            })
+                                                            .child(view().w(px(8.0)).h(px(8.0)).mt(px(6.0)).rounded(px(4.0)).bg(c(color)))
+                                                            .child(
+                                                                view()
+                                                                    .flex_1()
+                                                                    .gap(px(2.0))
+                                                                    .child(text(title).number_of_lines(2u32).text_size(px(14.0)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::FG)))
+                                                                    .child(if body.trim().is_empty() { view().into_element() } else { text(body).number_of_lines(2u32).text_size(px(13.0)).text_color(c(tokens::MUTED)).into_element() })
+                                                                    .child(text(theme::ago(at)).text_size(px(11.5)).text_color(c(tokens::SUBTLE))),
+                                                            ),
+                                                    );
+                                                }
+                                                col.into_element()
                                             }))
                                             .child(dynamic({
                                                 let run_send = run_send.clone();

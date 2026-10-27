@@ -72,6 +72,8 @@ const ES: &[(&str, &str)] = &[
     ("Name (e.g. Claude)", "Nombre (p. ej. Claude)"),
     ("Orchestrate", "Orquestar"),
     ("Reply", "Responder"),
+    ("Notifications", "Notificaciones"),
+    ("Nothing yet: agent replies, incidents and approvals show up here.", "Nada todavía: aquí aparecen las respuestas de los agentes, los incidentes y las aprobaciones."),
     ("Resend", "Reenviar"),
     ("There was nothing to resend in this thread.", "No había nada para reenviar en este hilo."),
     ("See changes", "Ver cambios"),

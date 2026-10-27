@@ -399,6 +399,7 @@ pub const TAB_APPROVALS: &[&str] = &["M22 11.08V12a10 10 0 1 1-5.93-9.14", "m9 1
 pub const TAB_JOBS: &[&str] = &["M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01"];
 pub const TAB_ENVS: &[&str] = &["M4 2h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z", "M4 14h16a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2Z", "M6 6h.01", "M6 18h.01"];
 pub const TAB_INCIDENTS: &[&str] = &["m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3", "M12 9v4", "M12 17h.01"];
+pub const BELL: &[&str] = &["M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9", "M10.3 21a1.94 1.94 0 0 0 3.4 0"];
 pub const SLIDERS: &[&str] = &["M20 7h-9", "M14 17H5", "M17 14a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M7 4a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z"];
 pub const LAPTOP: &[&str] = &["M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9", "M2 20h20", "M4 16h16l1.5 4h-19Z"];
 pub const CLOUD: &[&str] = &["M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z"];

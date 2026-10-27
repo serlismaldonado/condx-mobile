@@ -458,6 +458,19 @@ impl Phone {
         n
     }
 
+    /// Los avisos recientes (de la Mac y del sitio en la nube), el más nuevo primero: la campana.
+    pub fn notifications(&self) -> Vec<Value> {
+        let mut all: Vec<Value> = vec![];
+        for r in self.engine.rows(&self.threads_scope).into_iter().filter(|r| r.row.id == "_notifications" || r.row.id == "site-notifications") {
+            let items: Vec<Value> = r.row.values.get("items").and_then(Value::as_str).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+            all.extend(items);
+        }
+        all.sort_by_key(|n| std::cmp::Reverse(n["at"].as_i64().unwrap_or(0)));
+        all.dedup_by(|a, b| a["title"] == b["title"] && (a["at"].as_i64().unwrap_or(0) - b["at"].as_i64().unwrap_or(0)).abs() < 5_000);
+        all.truncate(60);
+        all
+    }
+
     pub fn approvals(&self) -> Vec<Approval> {
         let s = |v: &Values, k: &str| v.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
         // La fila es del daemon: otro teléfono pudo dejar su decisión. Solo cuenta la de esta llave.
@@ -553,7 +566,7 @@ impl Phone {
             .into_iter()
             // `_mac` y `_new` no son hilos: la llave de la Mac y donde se piden hilos nuevos.
             // Tampoco el resumen del sitio en la nube (`site-overview`).
-            .filter(|r| !r.row.id.starts_with('_') && r.row.id != "site-overview")
+            .filter(|r| !r.row.id.starts_with('_') && r.row.id != "site-overview" && r.row.id != "site-notifications")
             .map(|r| {
                 let v = &r.row.values;
                 let own = v.get("deviceKey").and_then(Value::as_str) == Some(mine.as_str());
