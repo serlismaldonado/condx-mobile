@@ -160,6 +160,9 @@ pub struct Composer {
     /// Otro modelo para el próximo mensaje (el chip del modelo) y si se ve la lista para elegir.
     pub model_pick: Signal<Option<String>>,
     pub model_menu: Signal<bool>,
+    /// Los proyectos de la Mac y en cuál trabaja el próximo hilo nuevo (el «+», como en Claude).
+    pub projects: Signal<Vec<String>>,
+    pub project_pick: Signal<Option<String>>,
 }
 
 /// A qué agente va el texto (la mención del principio) y su modelo y modelos; sin mención, los
@@ -997,6 +1000,10 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
     };
     let files = composer.files;
     let (agent_models, default_models, model_pick, model_menu) = (composer.agent_models, composer.default_models, composer.model_pick, composer.model_menu);
+    let (projects, project_pick) = (composer.projects, composer.project_pick);
+    let is_new = id == "_new";
+    // El proyecto elegido, si la Mac todavía lo tiene.
+    let picked_project = move || project_pick.get().filter(|p| projects.get().contains(p));
     // El anillo del contexto: tocarlo muestra cuánto («45k / 200k · 22%»).
     let context_label = signal(false);
     let do_send = move || {
@@ -1020,6 +1027,10 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                 msg = format!("[model: {m}] {msg}");
             }
             model_pick.set(None);
+        }
+        // Un hilo nuevo: en qué proyecto trabaja (antes que el modelo, firmado con el texto).
+        if is_new && let Some(p) = picked_project() {
+            msg = format!("[project: {p}] {msg}");
         }
         model_menu.set(false);
         text_sig.set(String::new());
@@ -1223,19 +1234,40 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                     menu.set(false);
                                     f();
                                 })
-                                .child(text(label).text_size(px(14.0)).text_color(c(tokens::FG)))
-                                .child(text(hint).text_size(px(12.0)).text_color(c(tokens::MUTED)))
+                                .child(text(crate::i18n::t(label)).text_size(px(14.0)).text_color(c(tokens::FG)))
+                                .child(view().flex_1().child(text(crate::i18n::t(hint)).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::MUTED))))
                         };
-                        view()
-                            .mx_3()
-                            .mt_2()
-                            .rounded(px(8.0))
-                            .border_1()
-                            .border_color(c(tokens::CARD_BORDER))
-                            .bg(c(tokens::PANEL))
-                            .overflow_hidden()
-                            .child(item("Take a photo", "the camera opens; agents that see images get it", photo))
-                            .into_element()
+                        let mut card = view().mx_3().mt_2().rounded(px(8.0)).border_1().border_color(c(tokens::CARD_BORDER)).bg(c(tokens::PANEL)).overflow_hidden();
+                        // En qué proyecto trabaja el hilo nuevo: uno de la Mac, o que lo deduzca del mensaje.
+                        let list = projects.get();
+                        if is_new && !list.is_empty() {
+                            let chosen = picked_project();
+                            card = card.child(view().px_3().pt(px(10.0)).pb(px(4.0)).child(text(crate::i18n::t("Project")).text_size(px(11.5)).font_weight(FontWeight::MEDIUM).text_color(c(tokens::SUBTLE))));
+                            let row = |label: String, value: Option<String>, on: bool| {
+                                view()
+                                    .flex_row()
+                                    .gap_3()
+                                    .items_center()
+                                    .px_3()
+                                    .h(px(42.0))
+                                    .active(|s| s.bg(c(tokens::ACTIVE)))
+                                    .on_press(move || {
+                                        menu.set(false);
+                                        theme::set_pref("lastProject", value.clone().map(serde_json::Value::String).unwrap_or(serde_json::Value::Null));
+                                        project_pick.set(value.clone());
+                                    })
+                                    .child(theme::icon(theme::FOLDER, if on { tokens::ACCENT } else { tokens::MUTED }, 16.0))
+                                    .child(view().flex_1().child(text(label).number_of_lines(1u32).text_size(px(14.0)).text_color(c(tokens::FG))))
+                                    .child(if on { theme::icon(theme::CHECK, tokens::ACCENT, 16.0).into_element() } else { view().into_element() })
+                            };
+                            card = card.child(row(crate::i18n::t("From the message"), None, chosen.is_none()));
+                            for p in list {
+                                let on = chosen.as_deref() == Some(p.as_str());
+                                card = card.child(row(p.clone(), Some(p), on));
+                            }
+                            card = card.child(view().h(px(1.0)).bg(c(tokens::CARD_BORDER)));
+                        }
+                        card.child(item("Take a photo", "the camera opens; agents that see images get it", photo)).into_element()
                     }
                 }))
                 // Escribir, o la barra de la grabación mientras graba: la tarjeta con el texto arriba
@@ -1298,6 +1330,25 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             .gap_2()
                             .items_center()
                             .child(round(38.0).border_1().border_color(c(tokens::CARD_BORDER)).active(|s| s.bg(c(tokens::ACTIVE))).on_press(move || menu.set(!menu.get())).child(theme::icon(theme::PLUS, tokens::MUTED, 20.0)))
+                            // El proyecto del hilo nuevo (tocarlo abre el «+» para cambiarlo).
+                            .child(dynamic(move || {
+                                let Some(p) = picked_project().filter(|_| is_new) else { return view().into_element() };
+                                view()
+                                    .flex_row()
+                                    .gap(px(5.0))
+                                    .items_center()
+                                    .h(px(30.0))
+                                    .px(px(10.0))
+                                    .max_w(px(150.0))
+                                    .rounded(px(15.0))
+                                    .border_1()
+                                    .border_color(c(tokens::CARD_BORDER))
+                                    .active(|s| s.bg(c(tokens::ACTIVE)))
+                                    .on_press(move || menu.set(!menu.get()))
+                                    .child(theme::icon(theme::FOLDER, tokens::MUTED, 13.0))
+                                    .child(text(p).number_of_lines(1u32).text_size(px(12.0)).text_color(c(tokens::FG)))
+                                    .into_element()
+                            }))
                             // El modelo con que contesta el agente (el de la mención o el predeterminado):
                             // tocarlo deja elegir otro para este mensaje.
                             .child(dynamic(move || {

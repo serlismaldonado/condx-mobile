@@ -148,6 +148,7 @@ pub fn App() -> impl IntoElement {
     let attach_menu = signal(false);
     let catalog = signal(Vec::<(String, String, String)>::new());
     let agent_models = signal(Vec::<(String, Option<String>, Vec<String>)>::new());
+    let projects = signal(Vec::<String>::new());
     let default_models = signal((String::new(), Vec::<String>::new()));
     // Una versión nueva de esta app (la publica el daemon): versión, número y enlace.
     let apk = signal(None::<(String, i64, String)>);
@@ -311,6 +312,10 @@ pub fn App() -> impl IntoElement {
                                 if let Some(cat) = with_phone(&slot, |p| p.catalog()).await
                                     && catalog.get() != cat {
                                         catalog.set(cat);
+                                    }
+                                if let Some(ps) = with_phone(&slot, |p| p.projects()).await
+                                    && projects.get() != ps {
+                                        projects.set(ps);
                                     }
                                 if let Some((am, dm)) = with_phone(&slot, |p| (p.agent_models(), p.default_models())).await {
                                     if agent_models.get() != am {
@@ -665,6 +670,9 @@ pub fn App() -> impl IntoElement {
             default_models,
             model_pick: signal(None),
             model_menu: signal(false),
+            projects,
+            // El último proyecto elegido sigue elegido (se cambia en el «+»).
+            project_pick: signal(theme::pref("lastProject").as_str().map(str::to_string)),
             photo: std::rc::Rc::new(move || {
                 let add = add_photo.clone();
                 app_owner.run(|| spawn(async move {

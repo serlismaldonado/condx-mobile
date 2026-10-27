@@ -715,6 +715,13 @@ impl Phone {
             .collect()
     }
 
+    /// Los proyectos de la Mac (fila `_projects`): para elegir en qué proyecto trabaja un hilo nuevo.
+    pub fn projects(&self) -> Vec<String> {
+        let Some(r) = self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_projects") else { return vec![] };
+        let list: Vec<Value> = r.row.values.get("projects").and_then(Value::as_str).and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
+        list.iter().filter_map(|p| p["name"].as_str().map(str::to_string)).collect()
+    }
+
     /// El modelo predeterminado y los del proveedor predeterminado (para un hilo nuevo o sin mención).
     pub fn default_models(&self) -> (String, Vec<String>) {
         let v = self
