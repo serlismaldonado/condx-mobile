@@ -60,6 +60,9 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" "ndk;$NDK_VERSION" >/dev/null
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      # nsh compila también el crate para esta máquina (Linux): con GTK 4 (nsh-platform-linux).
+      - name: GTK 4 (for the host build)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libgtk-4-dev >/dev/null
       - name: nsh
         run: |
           curl -fsSL https://nsh.dev/install.sh | sh
