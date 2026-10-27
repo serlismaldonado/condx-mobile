@@ -86,6 +86,8 @@ pub fn App() -> impl IntoElement {
     theme::apply_scheme(&scheme.get(), false);
     // En qué idioma contestan los agentes (lo configura la Mac).
     let agent_lang = signal(String::new());
+    // La nube contesta aunque la Mac esté encendida (para probar el sitio): lo dice el latido de la Mac.
+    let cloud_mode = signal(false);
     // Agentes de fuera conectados al MCP remoto (Claude en cualquier lugar): la lista, la URL del conector
     // y el formulario para conectar otro (nombre, nivel y el código que sale).
     let mcp_conns = signal(Vec::<(String, String, String, i64)>::new());
@@ -295,8 +297,8 @@ pub fn App() -> impl IntoElement {
                             }
                         }
                         screen.set(Screen::Ready);
-                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads(), p.mac_alive_at()))).await {
-                            Some(Ok((list, pending, incs, ks, can, ths, alive))) => {
+                        match with_phone(&slot, |p| p.sync().map(|list| (list, p.pending_changes(), p.incidents(), p.keys(), p.can_receive_keys(), p.threads(), (p.mac_alive_at(), p.mac_handover())))).await {
+                            Some(Ok((list, pending, incs, ks, can, ths, (alive, handed)))) => {
                                 failures = 0;
                                 // El hilo pedido desde un incidente: abrirlo cuando el daemon contesta.
                                 if let Some(pid) = pending_thread.get()
@@ -393,7 +395,11 @@ pub fn App() -> impl IntoElement {
                                 // Sin latido de la Mac en 3 min (late cada minuto) o despedida: está apagada
                                 // o sin red; contesta el sitio en la nube, si hay.
                                 let mac_off = alive.filter(|at| sync::now_ms() - at > MAC_OFFLINE_MS);
-                                let p = if mac_off.is_some() { chat::Presence::Cloud } else { chat::Presence::Mac };
+                                // O la Mac se hizo a un lado (el interruptor de Ajustes): contesta la nube.
+                                if cloud_mode.get() != handed {
+                                    cloud_mode.set(handed);
+                                }
+                                let p = if mac_off.is_some() || handed { chat::Presence::Cloud } else { chat::Presence::Mac };
                                 if presence.get() != p {
                                     presence.set(p);
                                 }
@@ -1413,6 +1419,17 @@ pub fn App() -> impl IntoElement {
                                                         ])
                                                     })
                                                     .child(muted(if lang == "Same as each message" { "Automatic: each agent answers in the language of the message." } else { "Every agent, on the Mac and in the cloud site, answers in this language." }))
+                                                    .child(section("Who answers"))
+                                                    .child({
+                                                        // Se manda firmado a la Mac; el indicador cambia cuando ella lo publica.
+                                                        let on = cloud_mode.get();
+                                                        let pick = |cloud: bool| -> Box<dyn Fn()> {
+                                                            let run_send = run_send.clone();
+                                                            Box::new(move || run_send(serde_json::json!({ "settings": { "cloud": cloud } })))
+                                                        };
+                                                        theme::segmented(vec![("The Mac (when on)", 0, !on, pick(false)), ("The cloud site", 0, on, pick(true))])
+                                                    })
+                                                    .child(muted(if cloud_mode.get() { "The cloud site answers threads, tasks and Claude even with the Mac on (to try it). Switch back to let the Mac answer." } else { "The Mac answers while it's on; when it's off, the cloud site does." }))
                                                     .child(section("External agents"))
                                                     .child(mcp_section(slot_mcp.clone(), McpUi { conns: mcp_conns, url: mcp_url, loaded: mcp_loaded, form: mcp_form, name: mcp_name, level: mcp_level, code: mcp_code }))
                                                     .child(section("This phone")).child(

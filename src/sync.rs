@@ -752,6 +752,11 @@ impl Phone {
         self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("aliveAt")?.as_i64()
     }
 
+    /// Si la Mac se hizo a un lado para que conteste la nube (el interruptor de Ajustes).
+    pub fn mac_handover(&self) -> bool {
+        self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac").is_some_and(|r| r.row.values.get("handover") == Some(&Value::Bool(true)))
+    }
+
     /// La llave age de la Mac (la publica el daemon en la fila `_mac` de los hilos).
     pub fn mac_recipient(&self) -> Option<age::x25519::Recipient> {
         self.engine.rows(&self.threads_scope).into_iter().find(|r| r.row.id == "_mac")?.row.values.get("recipient")?.as_str()?.parse().ok()
