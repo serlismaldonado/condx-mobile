@@ -670,6 +670,7 @@ pub fn App() -> impl IntoElement {
     };
     let composer = {
         let add_photo = add_file.clone();
+        let add_picked = add_file.clone();
         let add_voice = add_file.clone();
         let send_voice = send_thread.clone();
         chat::Composer {
@@ -712,6 +713,40 @@ pub fn App() -> impl IntoElement {
                                 return;
                             }
                             Ok(scan::PhotoPoll::Failed(e)) => return status.set(e),
+                            Err(_) => return,
+                        }
+                    }
+                }));
+            }),
+            file: std::rc::Rc::new(move || {
+                let add = add_picked.clone();
+                app_owner.run(|| spawn(async move {
+                    match blocking(scan::start_pick).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => return status.set(e),
+                        Err(_) => return,
+                    }
+                    // Hasta 10 minutos para elegir (el selector puede ir a Drive y volver).
+                    for _ in 0..600 {
+                        timer(Duration::from_secs(1)).await;
+                        match blocking(scan::poll_pick).await {
+                            Ok(scan::PickPoll::Waiting) => continue,
+                            Ok(scan::PickPoll::Cancelled) => return,
+                            Ok(scan::PickPoll::Done(bytes, name, mime)) => {
+                                // Una imagen se achica como una foto (lo que un modelo necesita para verla).
+                                if mime.starts_with("image/") && mime != "image/gif" {
+                                    let jpeg_name = format!("{}.jpg", name.rsplit_once('.').map(|(n, _)| n).unwrap_or(&name));
+                                    match blocking(move || scan::shrink_photo(&bytes)).await {
+                                        Ok(Ok(jpeg)) => add(jpeg, jpeg_name, "image/jpeg".into(), "image", None, None),
+                                        Ok(Err(e)) => status.set(e),
+                                        Err(_) => {}
+                                    }
+                                } else {
+                                    add(bytes, name, mime, "file", None, None);
+                                }
+                                return;
+                            }
+                            Ok(scan::PickPoll::Failed(e)) => return status.set(e),
                             Err(_) => return,
                         }
                     }

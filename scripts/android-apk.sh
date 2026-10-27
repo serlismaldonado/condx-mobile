@@ -32,6 +32,8 @@ cat > "$TMP/AndroidManifest.xml" <<'XML'
         android:supportsRtl="true"
         android:theme="@style/Condx.Launch">
         <meta-data android:name="com.longbridge.nsh.RUST" android:value="true" />
+        <activity android:name="com.example.condxmobile.PickFile" android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" android:excludeFromRecents="true" />
         <activity android:name="com.longbridge.nsh.AppActivity" android:exported="true"
             android:windowSoftInputMode="adjustResize"
             android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density|fontScale|locale|layoutDirection">
@@ -51,6 +53,13 @@ CODE=$((MA * 10000 + MI * 100 + PA))
 "$BT/aapt2" compile --dir android/res -o "$TMP/res.zip"
 "$BT/aapt2" link -o "$TMP/manifest.apk" "$TMP/res.zip" -I "$ANDROID_HOME/platforms/android-35/android.jar" --manifest "$TMP/AndroidManifest.xml" --min-sdk-version 28 --target-sdk-version 35 --version-code "$CODE" --version-name "$VERSION"
 (cd "$TMP" && unzip -q -o manifest.apk -d m && zip -q -d in.apk AndroidManifest.xml resources.arsc && cd m && zip -q -X -0 ../in.apk resources.arsc && zip -q -X -r ../in.apk AndroidManifest.xml res)
+# Lo que nsh no trae (android/java): elegir un archivo (PickFile). Va como classes2.dex: Android carga
+# los dex extra solo (API 21+).
+mkdir -p "$TMP/jc" "$TMP/dex"
+"$JAVA_HOME/bin/javac" --release 11 -nowarn -cp "$ANDROID_HOME/platforms/android-35/android.jar" -d "$TMP/jc" $(find android/java -name '*.java')
+"$BT/d8" --min-api 28 --lib "$ANDROID_HOME/platforms/android-35/android.jar" --output "$TMP/dex" $(find "$TMP/jc" -name '*.class')
+mv "$TMP/dex/classes.dex" "$TMP/classes2.dex"
+(cd "$TMP" && zip -q -X in.apk classes2.dex)
 "$BT/zipalign" -P 16 -f 4 "$TMP/in.apk" "$TMP/aligned.apk"
 "$BT/apksigner" sign --ks "$HOME/.android/debug.keystore" --ks-pass pass:android --key-pass pass:android --out .nsh/out/condx-mobile-arm64.apk "$TMP/aligned.apk"
 "$BT/zipalign" -c -P 16 4 .nsh/out/condx-mobile-arm64.apk

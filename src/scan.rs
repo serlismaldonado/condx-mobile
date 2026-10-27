@@ -156,7 +156,10 @@ mod platform {
     /// Una fila de MediaStore para la foto: la tabla de siempre o, si falla, la del volumen principal.
     fn new_row<'a>(env: &mut JNIEnv<'a>, res: &JObject<'a>) -> Result<JObject<'a>, String> {
         let values = j!(env, "photo row", env.new_object("android/content/ContentValues", "()V", &[]));
-        for (k, v) in [("_display_name", "condx-pairing.jpg"), ("mime_type", "image/jpeg")] {
+        // Un nombre nuevo cada vez: con uno fijo, una fila que quedó de antes (la app se cerró a mitad)
+        // hacía fallar la siguiente («UNIQUE constraint»).
+        let name = format!("condx-{}.jpg", crate::sync::now_ms());
+        for (k, v) in [("_display_name", name.as_str()), ("mime_type", "image/jpeg")] {
             let (k, v) = (j!(env, "photo row", env.new_string(k)), j!(env, "photo row", env.new_string(v)));
             j!(env, "photo row", env.call_method(&values, "put", "(Ljava/lang/String;Ljava/lang/String;)V", &[JValue::Object(&k), JValue::Object(&v)]));
         }
@@ -345,6 +348,48 @@ mod platform {
         super::PhotoPoll::Done(bytes)
     }
 
+    fn picked_dir() -> Option<std::path::PathBuf> {
+        pending_file().map(|f| f.with_file_name("picked"))
+    }
+
+    /// Abre el selector de archivos del sistema (la actividad `PickFile` de la APK).
+    pub fn start_pick() -> Result<(), String> {
+        if let Some(d) = picked_dir() {
+            let _ = std::fs::remove_dir_all(&d);
+        }
+        with_env(|env| {
+            let ctx = context(env)?;
+            let pkg = j!(env, "file", env.call_method(&ctx, "getPackageName", "()Ljava/lang/String;", &[]).and_then(|v| v.l()));
+            let class = j!(env, "file", env.new_string("com.example.condxmobile.PickFile"));
+            let intent = j!(env, "file", env.new_object("android/content/Intent", "()V", &[]));
+            j!(env, "file", env.call_method(&intent, "setClassName", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;", &[JValue::Object(&pkg), JValue::Object(&class)]));
+            j!(env, "file", env.call_method(&intent, "addFlags", "(I)Landroid/content/Intent;", &[JValue::Int(0x1000_0000)]));
+            j!(env, "open the file picker", env.call_method(&ctx, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)]));
+            Ok(())
+        })
+    }
+
+    /// Lo que eligió la persona: (bytes, nombre, tipo) cuando terminó de copiarse.
+    pub fn poll_pick() -> super::PickPoll {
+        let Some(d) = picked_dir() else { return super::PickPoll::Failed("no app folder".into()) };
+        if d.join("cancel.txt").exists() {
+            let _ = std::fs::remove_dir_all(&d);
+            return super::PickPoll::Cancelled;
+        }
+        if let Ok(e) = std::fs::read_to_string(d.join("error.txt")) {
+            let _ = std::fs::remove_dir_all(&d);
+            return super::PickPoll::Failed(format!("couldn't read the file: {}", e.trim()));
+        }
+        let Ok(meta) = std::fs::read_to_string(d.join("meta.txt")) else { return super::PickPoll::Waiting };
+        let (mime, name) = meta.split_once('\n').unwrap_or(("application/octet-stream", "file"));
+        let res = std::fs::read(d.join("file.bin")).map_err(|e| e.to_string());
+        let _ = std::fs::remove_dir_all(&d);
+        match res {
+            Ok(bytes) => super::PickPoll::Done(bytes, name.trim().to_string(), mime.trim().to_string()),
+            Err(e) => super::PickPoll::Failed(e),
+        }
+    }
+
     /// Borra la fila (con o sin foto).
     pub fn cancel() {
         let _ = load();
@@ -393,9 +438,25 @@ mod platform {
     pub fn poll_photo() -> super::PhotoPoll {
         super::PhotoPoll::Failed("there's no camera here".into())
     }
+    pub fn start_pick() -> Result<(), String> {
+        Err("choosing files isn't available here".into())
+    }
+    pub fn poll_pick() -> super::PickPoll {
+        super::PickPoll::Failed("choosing files isn't available here".into())
+    }
 }
 
-pub use platform::{cancel, clipboard, in_foreground, open_camera_app, open_url, pending, poll, poll_photo, start, start_photo};
+pub use platform::{cancel, clipboard, in_foreground, open_camera_app, open_url, pending, poll, poll_photo, poll_pick, start, start_photo, start_pick};
+
+/// En qué va un archivo elegido para adjuntar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PickPoll {
+    Waiting,
+    Cancelled,
+    /// Bytes, nombre y tipo.
+    Done(Vec<u8>, String, String),
+    Failed(String),
+}
 
 /// En qué va una foto para adjuntar.
 #[derive(Debug, Clone, PartialEq)]

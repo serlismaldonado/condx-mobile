@@ -147,6 +147,8 @@ pub struct Composer {
     /// El catálogo de agentes: (id, nombre, marca del proveedor).
     pub catalog: Signal<Vec<(String, String, String)>>,
     pub photo: Rc<dyn Fn()>,
+    /// Elegir un archivo del teléfono (el selector del sistema).
+    pub file: Rc<dyn Fn()>,
     pub mic: Rc<dyn Fn()>,
     /// Termina la grabación: `true` la manda, `false` la descarta.
     pub stop: Rc<dyn Fn(bool)>,
@@ -615,6 +617,42 @@ fn check_mark(double: bool, color: (u32, u32)) -> View {
     view().child(icon)
 }
 
+/// Un `@agente` del catálogo en medio del texto pasa al principio (Condx lee la mención ahí). Sin
+/// mención, o ya al principio, el texto queda igual.
+pub fn mention_first(msg: &str, catalog: &[(String, String, String)]) -> String {
+    let trimmed = msg.trim_start();
+    if trimmed.starts_with('@') {
+        return msg.to_string();
+    }
+    let known = |w: &str| {
+        let w = w.trim_start_matches('@').trim_end_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        catalog.iter().find(|(id, name, _)| id.to_lowercase() == w || name.to_lowercase() == w).map(|(id, _, _)| id.clone())
+    };
+    let words: Vec<&str> = msg.split(' ').collect();
+    let Some((ix, id)) = words.iter().enumerate().find_map(|(i, w)| w.starts_with('@').then(|| known(w)).flatten().map(|id| (i, id))) else { return msg.to_string() };
+    let rest: Vec<&str> = words.iter().enumerate().filter(|(i, _)| *i != ix).map(|(_, w)| *w).collect();
+    format!("@{id} {}", rest.join(" ").trim())
+}
+
+/// Mantener presionado un mensaje: Responder o Copiar (una hoja del sistema, como en Claude).
+fn message_menu(reply: Signal<ReplyTo>, to: ReplyTo, copy: String) -> impl Fn() + 'static {
+    move || {
+        let (to, copy) = (to.clone(), copy.clone());
+        spawn(async move {
+            let (reply_l, copy_l) = (crate::i18n::t("Reply"), crate::i18n::t("Copy"));
+            let picked = nsh_base::alert_dialog().action(reply_l.clone()).action(copy_l.clone()).cancel(crate::i18n::t("Cancel")).action_sheet().show().await;
+            match picked.ok().flatten().map(|s| s.to_string()) {
+                Some(p) if p == reply_l => reply.set(to),
+                Some(p) if p == copy_l => {
+                    set_clipboard(copy);
+                    toast(crate::i18n::t("Copied"), ToastDuration::Short);
+                }
+                _ => {}
+            }
+        });
+    }
+}
+
 fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View, approvals: Signal<Vec<Approval>>, decide: &Decide, reply: Signal<ReplyTo>, handles: &[(String, String, String)]) -> AnyElement {
     let body = crate::i18n::daemon_text(it["text"].as_str().unwrap_or_default().trim());
     let at = it["at"].as_i64().unwrap_or(0);
@@ -653,9 +691,9 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                     }
                     row.child(text(format!("{to}{}", short_ago(at))).text_size(px(11.0)).text_color(c(tokens::SUBTLE))).into_element()
                 });
-            let to = Some((None, "you".to_string(), snippet));
-            let long = to.clone();
-            swipe_to_reply(bubble.on_long_press(move || reply.set(long.clone())), reply, to).into_element()
+            let _ = snippet;
+            let to = Some((None, "you".to_string(), body.clone()));
+            swipe_to_reply(bubble.on_long_press(message_menu(reply, to.clone(), body.clone())), reply, to).into_element()
         }
         "agent" | "reply" | "external" => {
             let external = it["kind"] == "external";
@@ -688,9 +726,10 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                 });
             // Mantener presionado también responde; con código adentro es la única forma (el gesto
             // lateral es del código o de la tabla, que se desplazan).
-            let to = Some((handle, name, snippet));
-            let long = to.clone();
-            let bubble = bubble.on_long_press(move || reply.set(long.clone()));
+            // Al responder va el mensaje entero (la cita completa), no solo el comienzo.
+            let _ = snippet;
+            let to = Some((handle, name, body.clone()));
+            let bubble = bubble.on_long_press(message_menu(reply, to.clone(), body.clone()));
             if body.contains("```") || crate::md::has_table(&body) {
                 bubble.into_element()
             } else {
@@ -1017,18 +1056,28 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
     let picked_project = move || project_pick.get().filter(|p| projects.get().contains(p));
     // El anillo del contexto: tocarlo muestra cuánto («45k / 200k · 22%»).
     let context_label = signal(false);
+    let catalog = composer.catalog;
     let do_send = move || {
         let mut msg = text_sig.get().trim().to_string();
         let pending = files.get();
         if pending.iter().any(|f| f.uploaded.is_none()) || (msg.is_empty() && !pending.iter().any(|f| matches!(f.uploaded, Some(Ok(_))))) {
             return;
         }
-        // Respondiendo un mensaje: va al agente que lo escribió (si no se mencionó a otro) con la cita.
-        if let Some((handle, name, snippet)) = reply.get() {
+        // Un @agente en medio del texto («revisa esto @fixer»): va al principio, que es donde lo lee Condx.
+        msg = mention_first(&msg, &catalog.get());
+        // Respondiendo un mensaje: va al agente que lo escribió (si no se mencionó a otro) con la cita
+        // entera (cabe en lo que acepta un pedido firmado).
+        if let Some((handle, name, quoted)) = reply.get() {
             if let Some(h) = handle.filter(|_| !msg.starts_with('@')) {
                 msg = format!("@{h} {msg}");
             }
-            msg = format!("{msg}\n\n> Replying to {name}: {snippet}");
+            let room = 3_800usize.saturating_sub(msg.chars().count() + name.chars().count() + 40).max(200);
+            let mut quoted: String = quoted.trim().to_string();
+            if quoted.chars().count() > room {
+                quoted = format!("{}…", quoted.chars().take(room).collect::<String>());
+            }
+            let quoted = quoted.lines().collect::<Vec<_>>().join("\n> ");
+            msg = format!("{msg}\n\n> Replying to {name}: {quoted}");
             reply.set(None);
         }
         // Otro modelo para este mensaje (el chip): va al principio, firmado con el texto.
@@ -1037,7 +1086,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
             if m != current {
                 msg = format!("[model: {m}] {msg}");
             }
-            model_pick.set(None);
+            // El modelo elegido se queda para los mensajes siguientes (se cambia en el chip).
         }
         // Un hilo nuevo: en qué proyecto trabaja (antes que el modelo, firmado con el texto).
         if is_new && let Some(p) = picked_project() {
@@ -1257,12 +1306,14 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                 // Qué adjuntar.
                 .child(dynamic({
                     let photo = composer.photo.clone();
+                    let pick_file = composer.file.clone();
                     let menu = composer.menu;
                     move || {
                         if !menu.get() {
                             return view().into_element();
                         }
                         let photo = photo.clone();
+                        let pick_file = pick_file.clone();
                         let item = |label: &'static str, hint: &'static str, f: Rc<dyn Fn()>| {
                             view()
                                 .flex_row()
@@ -1308,7 +1359,10 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                             }
                             card = card.child(view().h(px(1.0)).bg(c(tokens::CARD_BORDER)));
                         }
-                        card.child(item("Take a photo", "the camera opens; agents that see images get it", photo)).into_element()
+                        card.child(item("Take a photo", "the camera opens; agents that see images get it", photo))
+                            .child(view().h(px(1.0)).bg(c(tokens::CARD_BORDER)))
+                            .child(item("Choose a file", "from the phone: images, PDFs, code, logs (up to 9 MB)", pick_file))
+                            .into_element()
                     }
                 }))
                 // Escribir, o la barra de la grabación mientras graba: la tarjeta con el texto arriba
