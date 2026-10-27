@@ -511,7 +511,7 @@ fn banner(tone: (u32, u32), label: &str, body: View) -> View {
         .overflow_hidden()
         .bg(c(tokens::HOVER))
         .child(view().w(px(3.0)).bg(c(tone)))
-        .child(view().flex_1().gap_1().px_3().py_2().child(text(label.to_uppercase()).text_size(px(10.5)).letter_spacing(px(0.6)).font_weight(FontWeight::MEDIUM).text_color(c(tone))).child(body))
+        .child(view().flex_1().gap_1().px_3().py_2().child(text(crate::i18n::t(label).to_uppercase()).text_size(px(10.5)).letter_spacing(px(0.6)).font_weight(FontWeight::MEDIUM).text_color(c(tone))).child(body))
 }
 
 /// La marca de un mensaje enviado: una (✓, en la nube) o dos (✓✓, la leyó un agente), dibujadas como
