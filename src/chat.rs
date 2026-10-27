@@ -398,10 +398,86 @@ fn short_ago(ms: i64) -> String {
     theme::short(ms)
 }
 
+/// «12 s», «1 min 5 s»: cuánto tardó (o lleva) una vuelta.
+fn span(ms: i64) -> String {
+    let s = (ms / 1000).max(0);
+    if s < 60 { format!("{s} s") } else if s % 60 == 0 { format!("{} min", s / 60) } else { format!("{} min {} s", s / 60, s % 60) }
+}
+
+/// Lo que hizo un agente antes de responder (lo que pensó, lo que dijo mientras trabajaba y las
+/// herramientas que usó, con lo que devolvieron), plegado bajo una línea como en Claude: abierto
+/// mientras trabaja, cerrado cuando ya respondió; un toque lo invierte.
+fn steps_block(name: &str, it: &Value) -> AnyElement {
+    let steps: Vec<Value> = it["steps"].as_array().cloned().unwrap_or_default();
+    let live = it["live"] == true;
+    let at = it["at"].as_i64().unwrap_or(0);
+    // La vuelta empezó con el mensaje de la persona: la misma llave en vivo y ya respondida.
+    let start = if live { it["since"].as_i64() } else { it["took"].as_i64().map(|t| at - t) };
+    let key = format!("{name}:{}", start.unwrap_or(at));
+    let activity = it["activity"].as_str().unwrap_or("Thinking…").to_string();
+    let took = it["took"].as_i64();
+    dynamic(move || {
+        if live {
+            global::<live::Tick>().get();
+        }
+        let toggled = global::<live::StepsOpen>().get();
+        let open = toggled.0.get(&key).copied().unwrap_or(live);
+        let tools = steps.iter().filter(|s| s["kind"] == "tool").count();
+        let thought = steps.iter().any(|s| s["kind"] == "thinking");
+        let tools_label = match tools {
+            0 => String::new(),
+            1 => crate::i18n::tr(" · 1 tool".into(), " · 1 herramienta".into()),
+            n => crate::i18n::tr(format!(" · {n} tools"), format!(" · {n} herramientas")),
+        };
+        let chevron = theme::icon(if open { theme::CHEVRON_DOWN } else { theme::CHEVRON_RIGHT }, tokens::SUBTLE, 14.0);
+        let mut head = view().flex_row().items_center().gap(px(6.0)).py(px(2.0)).child(chevron);
+        if live {
+            let elapsed = start.map(|s| format!(" {}", span(crate::sync::now_ms() - s))).unwrap_or_default();
+            head = head.child(live::shimmer(&activity, 13.0)).child(text(format!("{elapsed}{tools_label}")).text_size(px(12.0)).text_color(c(tokens::SUBTLE)));
+        } else {
+            let secs = took.map(span).unwrap_or_default();
+            let label = match (thought, secs.is_empty()) {
+                (true, false) => crate::i18n::tr(format!("Thought for {secs}"), format!("Pensó {secs}")),
+                (true, true) => crate::i18n::tr("Thought".into(), "Pensó".into()),
+                (false, false) => crate::i18n::tr(format!("Worked for {secs}"), format!("Trabajó {secs}")),
+                (false, true) => crate::i18n::tr("Worked".into(), "Trabajó".into()),
+            };
+            head = head.child(text(format!("{label}{tools_label}")).text_size(px(12.5)).text_color(c(tokens::MUTED)));
+        }
+        let k = key.clone();
+        let mut col = view().gap(px(6.0)).child(head.on_press(move || {
+            let mut m = global::<live::StepsOpen>().get();
+            let now = m.0.get(&k).copied().unwrap_or(live);
+            m.0.insert(k.clone(), !now);
+            global::<live::StepsOpen>().set(m);
+        }));
+        if open && !steps.is_empty() {
+            let mut list = view().gap(px(8.0)).ml(px(6.0)).pl(px(12.0)).border_l(px(1.5)).border_color(c(tokens::CARD_BORDER));
+            for s in &steps {
+                let body = s["text"].as_str().unwrap_or("").to_string();
+                list = list.child(match s["kind"].as_str() {
+                    Some("tool") => {
+                        let mut t = view().gap(px(2.0)).child(text(body).font_family(theme::MONO_FONT).text_size(px(11.5)).number_of_lines(2u32).text_color(c(tokens::MUTED)));
+                        if let Some(r) = s["result"].as_str().filter(|r| !r.is_empty()) {
+                            t = t.child(text(r.to_string()).font_family(theme::MONO_FONT).text_size(px(11.0)).number_of_lines(2u32).text_color(c(if s["error"] == true { tokens::DANGER } else { tokens::SUBTLE })));
+                        }
+                        t.into_element()
+                    }
+                    Some("thinking") => text(body).text_size(px(13.0)).line_height(px(18.5)).text_color(c(tokens::MUTED)).into_element(),
+                    _ => text(body).text_size(px(13.0)).line_height(px(18.5)).text_color(c(tokens::FG)).into_element(),
+                });
+            }
+            col = col.child(list);
+        }
+        col.into_element()
+    })
+    .into_element()
+}
+
 /// El texto de un agente: la prosa arriba y los campos de su resultado (`clave: valor`) como filas.
 /// Lo que el agente escribe ahora: el texto aparece a su paso con el cursor al final; sin texto
 /// todavía (o mientras usa una herramienta), qué hace, con un brillo que lo recorre.
-fn live_body(name: &str, it: &Value) -> AnyElement {
+fn live_body(name: &str, it: &Value, with_activity: bool) -> AnyElement {
     let text_now = it["text"].as_str().unwrap_or("").to_string();
     let activity = it["activity"].as_str().unwrap_or("Thinking…").to_string();
     let key = format!("{name}:{}", it["at"]);
@@ -414,7 +490,7 @@ fn live_body(name: &str, it: &Value) -> AnyElement {
             col = col.child(view().px_3().py(px(10.0)).rounded(px(14.0)).rounded_tl(px(4.0)).bg(c(tokens::HOVER)).child(agent_body(&format!("{shown}{}", live::CARET))));
         }
         // Escribiendo: el cursor basta; pensando o con una herramienta, se dice qué hace.
-        if shown.is_empty() || !thinking {
+        if with_activity && (shown.is_empty() || !thinking) {
             col = col.child(view().pl(px(2.0)).child(live::shimmer(&activity, 13.5)));
         }
         col.into_element()
@@ -589,8 +665,10 @@ fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View
                         .child(if external { view().px(px(5.0)).h(px(16.0)).justify_center().rounded(px(4.0)).border_1().border_color(c(tokens::CARD_BORDER)).child(text("external").text_size(px(10.0)).text_color(c(tokens::MUTED))).into_element() } else { view().into_element() })
                         .child(text(short_ago(at)).text_size(px(11.0)).text_color(c(tokens::SUBTLE))),
                 )
+                // Lo que hizo antes de responder (o lo que va haciendo): plegable.
+                .child(if it["steps"].as_array().is_some_and(|s| !s.is_empty()) { steps_block(&name, it) } else { view().into_element() })
                 .child(if it["live"] == true {
-                    live_body(&name, it)
+                    live_body(&name, it, it["steps"].as_array().is_none_or(|s| s.is_empty()))
                 } else {
                     view().px_3().py(px(10.0)).rounded(px(14.0)).rounded_tl(px(4.0)).bg(c(tokens::HOVER)).child(agent_body(&body)).into_element()
                 });

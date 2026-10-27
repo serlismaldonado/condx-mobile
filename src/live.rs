@@ -41,6 +41,11 @@ thread_local! {
 #[derive(Default, Clone, Copy, PartialEq)]
 pub struct Tick(pub u64);
 
+/// Los pasos que la persona abrió o cerró a mano (por respuesta: quién y cuándo empezó la vuelta); los
+/// demás siguen la regla: abiertos mientras el agente trabaja, cerrados cuando respondió.
+#[derive(Default, Clone, PartialEq)]
+pub struct StepsOpen(pub std::collections::BTreeMap<String, bool>);
+
 /// El botón para bajar al último mensaje se ve.
 #[derive(Default, Clone, Copy, PartialEq)]
 pub struct ShowDown(pub bool);
