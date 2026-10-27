@@ -526,7 +526,7 @@ fn check_mark(double: bool, color: (u32, u32)) -> View {
 }
 
 fn message(it: &Value, last_question: bool, quick: &dyn Fn(&'static str) -> View, approvals: Signal<Vec<Approval>>, decide: &Decide, reply: Signal<ReplyTo>, handles: &[(String, String, String)]) -> AnyElement {
-    let body = it["text"].as_str().unwrap_or_default().trim().to_string();
+    let body = crate::i18n::daemon_text(it["text"].as_str().unwrap_or_default().trim());
     let at = it["at"].as_i64().unwrap_or(0);
     match it["kind"].as_str().unwrap_or("system") {
         "user" => {

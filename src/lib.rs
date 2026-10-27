@@ -812,7 +812,11 @@ pub fn App() -> impl IntoElement {
         let (requested_by, recipe, created_at) = (item.requested_by.clone(), item.recipe.clone(), item.created_at);
         let summary = move || {
             tick.get();
-            let who = crate::i18n::t(&requested_by);
+            // «workflow “Nombre”» → «flujo “Nombre”» (el nombre no se traduce).
+            let who = match requested_by.strip_prefix("workflow ") {
+                Some(name) => format!("{} {name}", crate::i18n::t("workflow")),
+                None => crate::i18n::t(&requested_by),
+            };
             format!("{recipe} · {} {who}{}", crate::i18n::t("by"), if created_at > 0 { format!(" · {}", theme::ago(created_at)) } else { String::new() })
         };
         view()

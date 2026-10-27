@@ -187,3 +187,14 @@ const ES: &[(&str, &str)] = &[
 pub fn tr(en: String, es: String) -> String {
     if spanish() { es } else { en }
 }
+
+/// Las frases que escribe el daemon (en inglés, por diseño) con un dato adentro: «X waits for your
+/// approval» → «X espera tu aprobación». Lo demás, igual.
+pub fn daemon_text(s: &str) -> String {
+    if spanish() {
+        if let Some(what) = s.strip_suffix(" waits for your approval") {
+            return format!("{what} espera tu aprobación");
+        }
+    }
+    s.to_string()
+}
