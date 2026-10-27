@@ -74,3 +74,4 @@ declarations of `condx-mobile/native` into `.nsh/types`. Register more with `reg
 
 NSH-generated files stay in `.nsh/`: runner sources in `.nsh/rust/` and default packages in `.nsh/out/`.
 Cargo keeps its normal `target/` directory and respects your existing `CARGO_TARGET_DIR`.
+Probado con hand_off.
