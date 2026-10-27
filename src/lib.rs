@@ -685,7 +685,8 @@ pub fn App() -> impl IntoElement {
             presence,
             agent_models,
             default_models,
-            model_pick: signal(None),
+            // El modelo elegido sigue elegido, también al volver a abrir la app (se cambia en el chip).
+            model_pick: signal(theme::pref("lastModel").as_str().map(str::to_string)),
             model_menu: signal(false),
             projects,
             run: run_send.clone(),

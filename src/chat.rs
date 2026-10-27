@@ -456,7 +456,7 @@ fn change_block(change: &Value) -> AnyElement {
             });
         let mut col = view().gap(px(6.0)).child(head);
         if open {
-            let mono = |s: String, color| text(s).font_family("monospace").text_size(px(11.5)).line_height(px(16.0)).text_color(c(color));
+            let mono = |s: String, color| text(s).font_family(theme::MONO_FONT).text_size(px(11.5)).line_height(px(16.0)).text_color(c(color));
             col = col.child(mono(format!("{} · {}", &commit, &branch), tokens::SUBTLE));
             if !stat.is_empty() {
                 col = col.child(mono(stat.clone(), tokens::MUTED));
@@ -1354,6 +1354,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
                                 .border_color(c(if on { tokens::ACCENT } else { tokens::CARD_BORDER }))
                                 .active(|s| s.bg(c(tokens::ACTIVE)))
                                 .on_press(move || {
+                                    theme::set_pref("lastModel", serde_json::Value::String(pick.clone()));
                                     model_pick.set(Some(pick.clone()));
                                     model_menu.set(false);
                                 })
