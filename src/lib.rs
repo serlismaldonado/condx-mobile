@@ -782,7 +782,9 @@ pub fn App() -> impl IntoElement {
     // Lo que espera primero; lo decidido aquí solo del último día (si no, el historial tapa lo que importa).
     let visible = move || {
         let day = sync::now_ms() - 24 * 3600 * 1000;
-        let mut list: Vec<Approval> = approvals.get().into_iter().filter(|a| a.status == "waiting-approval" || (a.decision.is_some() && a.created_at > day)).collect();
+        // Las que la Mac rechazó por viejas («rejected: stale decision») ya no esperan nada: se ocultan.
+        let stale = |a: &Approval| a.status != "waiting-approval" && a.phone_result.as_deref().is_some_and(|r| r.starts_with("rejected: "));
+        let mut list: Vec<Approval> = approvals.get().into_iter().filter(|a| !stale(a) && (a.status == "waiting-approval" || (a.decision.is_some() && a.created_at > day))).collect();
         list.sort_by_key(|a| (a.status != "waiting-approval", std::cmp::Reverse(a.created_at)));
         list
     };
@@ -810,7 +812,8 @@ pub fn App() -> impl IntoElement {
         let (requested_by, recipe, created_at) = (item.requested_by.clone(), item.recipe.clone(), item.created_at);
         let summary = move || {
             tick.get();
-            format!("{recipe} · by {requested_by}{}", if created_at > 0 { format!(" · {}", theme::ago(created_at)) } else { String::new() })
+            let who = crate::i18n::t(&requested_by);
+            format!("{recipe} · {} {who}{}", crate::i18n::t("by"), if created_at > 0 { format!(" · {}", theme::ago(created_at)) } else { String::new() })
         };
         view()
             .gap(px(6.0))
