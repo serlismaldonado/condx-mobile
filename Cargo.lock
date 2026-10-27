@@ -2452,6 +2452,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "ureq 2.12.1",
