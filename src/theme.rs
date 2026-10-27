@@ -382,6 +382,21 @@ pub const ARROW_UP: &[&str] = &["m5 12 7-7 7 7", "M12 19V5"];
 pub const ARROW_DOWN: &[&str] = &["M12 5v14", "m19 12-7 7-7-7"];
 /// La marca de Condx (assets/brand/mark.svg del repo condx).
 pub const CONDX_MARK: &[&str] = &["M18 5.5A9 9 0 1 0 18 18.5", "M15 9a4.5 4.5 0 1 0 0 6"];
+
+/// La marca como en la landing y la app de escritorio: trazo 2.2 y puntas rectas (los íconos usan 1.8 y
+/// puntas redondas).
+pub fn mark(size: f32) -> CanvasView {
+    let k = size / 24.0;
+    canvas(move || {
+        let mut p = Painter::new().scale(k, k).stroke_style(now(tokens::ACCENT)).line_width(2.2).line_cap(nsh_core::canvas::LineCap::Butt);
+        for d in CONDX_MARK {
+            p = p.stroke_svg(d);
+        }
+        p
+    })
+    .w(px(size))
+    .h(px(size))
+}
 /// Agregar (un hilo nuevo).
 /// Rama de git (Lucide «git-branch»).
 pub const BRANCH: &[&str] = &["M6 3v12", "M18 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6Z", "M18 9a9 9 0 0 1-9 9"];

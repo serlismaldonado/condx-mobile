@@ -1205,7 +1205,7 @@ pub fn App() -> impl IntoElement {
             .border_color(c(tokens::CARD_BORDER))
             .bg(c(tokens::GROUND))
             // La marca de Condx al lado del nombre.
-            .child(theme::icon(theme::CONDX_MARK, tokens::ACCENT, 20.0))
+            .child(theme::mark(20.0))
             .child(text("Condx").text_size(px(15.0)).font_weight(FontWeight::MEDIUM))
             .child(view().flex_1())
             .child(dynamic(move || {
