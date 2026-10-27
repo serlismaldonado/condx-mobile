@@ -1,0 +1,80 @@
+name: Release APK
+
+# La app del teléfono sin la Mac: la versión nueva (Cargo.toml, commit y tag), la APK compilada en Linux
+# con nsh y firmada con la misma llave que la instalada (secreto ANDROID_DEBUG_KEYSTORE, la
+# debug.keystore de la Mac en base64), publicada como release de GitHub. El daemon (la Mac o el sitio
+# en la nube) la lanza, la baja de aquí, la sube a Condx Cloud y avisa al teléfono.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The new version (X.Y.Z); empty for the next patch"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  NSH_VERSION: v0.2.0
+  NDK_VERSION: 27.2.12479018
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Signing key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_DEBUG_KEYSTORE }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then echo "::error::ANDROID_DEBUG_KEYSTORE isn't set: the APK must be signed with the same key as the installed app"; exit 1; fi
+          mkdir -p ~/.android
+          printf '%s' "$KEYSTORE" | base64 -d > ~/.android/debug.keystore
+      - name: New version
+        run: |
+          CURRENT="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          VERSION="${{ inputs.version }}"; VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ]; then IFS=. read -r MA MI PA <<<"$CURRENT"; VERSION="$MA.$MI.$((PA + 1))"; fi
+          TAG="v$VERSION"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then echo "::error::tag $TAG already exists"; exit 1; fi
+          sed -i "s/^version = \"$CURRENT\"/version = \"$VERSION\"/" Cargo.toml
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: apk
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Android SDK pieces
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "platforms;android-35" "build-tools;35.0.0" "ndk;$NDK_VERSION" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - name: nsh
+        run: |
+          curl -fsSL https://nsh.dev/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build the APK
+        run: |
+          cargo update -w -q
+          scripts/android-apk.sh
+      - name: Commit, tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "Condx release"
+          git config user.email "release@condx.local"
+          git add Cargo.toml Cargo.lock
+          git commit -q -m "release: $TAG"
+          git tag -a "$TAG" -m "condx-mobile $TAG"
+          git push -q origin HEAD "$TAG"
+          cp .nsh/out/condx-mobile-arm64.apk "condx-mobile-$TAG-arm64.apk"
+          sha256sum "condx-mobile-$TAG-arm64.apk" > "condx-mobile-$TAG-arm64.apk.sha256"
+          gh release create "$TAG" "condx-mobile-$TAG-arm64.apk" "condx-mobile-$TAG-arm64.apk.sha256" --title "condx-mobile $TAG" --generate-notes
