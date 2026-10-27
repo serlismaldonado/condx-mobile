@@ -1381,8 +1381,10 @@ pub fn App() -> impl IntoElement {
                                                     return col.child(theme::muted("Nothing yet: agent replies, incidents and approvals show up here.")).into_element();
                                                 }
                                                 for n in list {
-                                                    let title = n["title"].as_str().unwrap_or_default().to_string();
-                                                    let body = n["body"].as_str().unwrap_or_default().to_string();
+                                                    // Sin las marcas de Markdown (**, `): es una línea de aviso, no el mensaje.
+                                                    let plain = |s: &str| s.replace("**", "").replace('`', "");
+                                                    let title = plain(n["title"].as_str().unwrap_or_default());
+                                                    let body = plain(n["body"].as_str().unwrap_or_default());
                                                     let at = n["at"].as_i64().unwrap_or(0);
                                                     let (thread, kind) = (n["thread"].as_str().map(str::to_string), n["kind"].as_str().unwrap_or_default().to_string());
                                                     let incident = n["incident"].is_string();
