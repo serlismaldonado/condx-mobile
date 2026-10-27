@@ -30,7 +30,7 @@ cat > "$TMP/AndroidManifest.xml" <<'XML'
         android:extractNativeLibs="false"
         android:enableOnBackInvokedCallback="true"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/Condx.Launch">
         <meta-data android:name="com.longbridge.nsh.RUST" android:value="true" />
         <activity android:name="com.longbridge.nsh.AppActivity" android:exported="true"
             android:windowSoftInputMode="adjustResize"

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- La pantalla de arranque: Android la dibuja antes de que la app lea el tema guardado, así que va
+     oscura como la app (el claro es la excepción y se aplica enseguida al abrir). -->
+<resources>
+    <color name="condx_ground">#1C1C1C</color>
+    <style name="Condx.Launch" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/condx_ground</item>
+        <item name="android:statusBarColor">@color/condx_ground</item>
+        <item name="android:navigationBarColor">@color/condx_ground</item>
+    </style>
+</resources>

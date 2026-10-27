@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: la pantalla de arranque del sistema (el ícono sobre un fondo) también oscura. -->
+<resources>
+    <style name="Condx.Launch" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/condx_ground</item>
+        <item name="android:statusBarColor">@color/condx_ground</item>
+        <item name="android:navigationBarColor">@color/condx_ground</item>
+        <item name="android:windowSplashScreenBackground">@color/condx_ground</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@mipmap/ic_launcher</item>
+    </style>
+</resources>
