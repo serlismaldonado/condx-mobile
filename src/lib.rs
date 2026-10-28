@@ -1568,14 +1568,15 @@ pub fn App() -> impl IntoElement {
                                                     .child(section("Who answers"))
                                                     .child({
                                                         // Se manda firmado a la Mac; el indicador cambia cuando ella lo publica.
-                                                        let on = cloud_mode.get();
+                                                        // Con la Mac apagada ya contesta la nube: se ve elegida aunque el pedido siga sin tomarse.
+                                                        let on = cloud_mode.get() || presence.get() == chat::Presence::Cloud;
                                                         let pick = |cloud: bool| -> Box<dyn Fn()> {
                                                             let run_send = run_send.clone();
                                                             Box::new(move || run_send(serde_json::json!({ "settings": { "cloud": cloud } })))
                                                         };
                                                         theme::segmented(vec![("The Mac (when on)", 0, !on, pick(false)), ("The cloud site", 0, on, pick(true))])
                                                     })
-                                                    .child(muted(if cloud_mode.get() { "The cloud site answers threads, tasks and Claude even with the Mac on (to try it). Switch back to let the Mac answer." } else { "The Mac answers while it's on; when it's off, the cloud site does." }))
+                                                    .child(muted(if presence.get() == chat::Presence::Cloud && !cloud_mode.get() { "The Mac is off: the cloud site is answering. A change here is applied when the Mac is back." } else if cloud_mode.get() { "The cloud site answers threads, tasks and Claude even with the Mac on (to try it). Switch back to let the Mac answer." } else { "The Mac answers while it's on; when it's off, the cloud site does." }))
                                                     .child(section("External agents"))
                                                     .child(mcp_section(slot_mcp.clone(), McpUi { conns: mcp_conns, url: mcp_url, loaded: mcp_loaded, form: mcp_form, name: mcp_name, level: mcp_level, code: mcp_code }))
                                                     .child(section("This phone")).child(

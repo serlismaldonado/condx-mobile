@@ -994,7 +994,7 @@ pub fn screen(id: String, current: Rc<dyn Fn() -> Option<Thread>>, text_sig: Sig
     let body = {
         let current = current.clone();
         move || -> AnyElement {
-            let Some(t) = current() else { return view().into_element() };
+            let Some(t) = current() else { return view().p_4().child(crate::theme::muted("This thread hasn't synced to the phone yet. It opens as soon as it arrives.")).into_element() };
             let handles = handles_of(&t);
             let last_question = t.items.iter().rposition(|i| i["kind"] == "question");
             let mut items = view().gap(px(14.0)).px_4().py_4();

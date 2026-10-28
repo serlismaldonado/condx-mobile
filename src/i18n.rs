@@ -64,6 +64,8 @@ const ES: &[(&str, &str)] = &[
     ("The cloud site", "La nube"),
     ("The cloud site answers threads, tasks and Claude even with the Mac on (to try it). Switch back to let the Mac answer.", "La nube contesta hilos, tareas y a Claude aunque la Mac esté encendida (para probarla). Vuelve a la Mac cuando termines."),
     ("The Mac answers while it's on; when it's off, the cloud site does.", "Contesta la Mac mientras está encendida; si está apagada, la nube."),
+    ("The Mac is off: the cloud site is answering. A change here is applied when the Mac is back.", "La Mac está apagada: contesta la nube. Un cambio aquí se aplica cuando la Mac vuelva."),
+    ("This thread hasn't synced to the phone yet. It opens as soon as it arrives.", "Este hilo todavía no llegó al teléfono. Se abre en cuanto llegue."),
     ("Merging into dev…", "Subiendo a dev…"),
     ("External agents", "Agentes externos"),
     ("Connect Claude (or another agent) to work on your projects from anywhere, even with the Mac off.", "Conecta a Claude (u otro agente) para trabajar en tus proyectos desde cualquier lugar, incluso con la Mac apagada."),
